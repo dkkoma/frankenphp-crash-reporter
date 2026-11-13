@@ -27,6 +27,7 @@
 #define MAX_FRAMES 64
 #define MAX_MODULES 16
 #define MAX_LINE PIPE_BUF
+#define MAX_BUILD_ID 64
 
 static const int reported_signals[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT};
 
@@ -225,7 +226,10 @@ static const char *next_mapping(const char *p, struct mapping *m)
         eol = end;
     }
     const char *q = parse_hex(p, eol, &m->start);
-    q = parse_hex(q + 1, eol, &m->end);
+    if (q < eol) {
+        q++;
+    }
+    q = parse_hex(q, eol, &m->end);
     for (int field = 0; field < 2 && q < eol; field++) {
         while (q < eol && *q != ' ') {
             q++;
@@ -255,6 +259,7 @@ struct module {
     const char *path;
     size_t path_len;
     uintptr_t base;
+    uintptr_t base_end;
 };
 
 static int find_module(uintptr_t addr, struct module *mod)
@@ -278,15 +283,24 @@ static int find_module(uintptr_t addr, struct module *mod)
             mod->path = found_path;
             mod->path_len = found_len;
             mod->base = m.start;
+            mod->base_end = m.end;
             has_base = 1;
         }
     }
     return has_base;
 }
 
-static const ElfW(Ehdr) *elf_header(uintptr_t base)
+static int in_header_mapping(const struct module *mod, uintptr_t addr, uint64_t len)
 {
-    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)base;
+    return addr >= mod->base && addr <= mod->base_end && len <= mod->base_end - addr;
+}
+
+static const ElfW(Ehdr) *elf_header(const struct module *mod)
+{
+    if (!in_header_mapping(mod, mod->base, sizeof(ElfW(Ehdr)))) {
+        return NULL;
+    }
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)mod->base;
     if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) {
         return NULL;
     }
@@ -295,42 +309,73 @@ static const ElfW(Ehdr) *elf_header(uintptr_t base)
 
 static uintptr_t load_bias(const struct module *mod)
 {
-    const ElfW(Ehdr) *eh = elf_header(mod->base);
+    const ElfW(Ehdr) *eh = elf_header(mod);
     return eh && eh->e_type == ET_EXEC ? 0 : mod->base;
 }
 
-static void append_build_id(const struct module *mod)
+static uint64_t note_align(uint64_t size)
 {
-    const ElfW(Ehdr) *eh = elf_header(mod->base);
-    if (!eh) {
-        append_str("null");
-        return;
+    return (size + 3) & ~(uint64_t)3;
+}
+
+static const unsigned char *find_build_id(const struct module *mod, size_t *len)
+{
+    const ElfW(Ehdr) *eh = elf_header(mod);
+    if (!eh || eh->e_phoff > mod->base_end - mod->base) {
+        return NULL;
     }
+    uintptr_t ph_addr = mod->base + eh->e_phoff;
+    if (!in_header_mapping(mod, ph_addr, (uint64_t)eh->e_phnum * sizeof(ElfW(Phdr)))) {
+        return NULL;
+    }
+    const ElfW(Phdr) *ph = (const ElfW(Phdr) *)ph_addr;
     uintptr_t bias = load_bias(mod);
-    const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(mod->base + eh->e_phoff);
     for (int i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_NOTE) {
             continue;
         }
-        const char *note = (const char *)(bias + ph[i].p_vaddr);
-        const char *note_end = note + ph[i].p_memsz;
-        while (note + sizeof(ElfW(Nhdr)) <= note_end) {
+        uintptr_t note = bias + ph[i].p_vaddr;
+        if (!in_header_mapping(mod, note, ph[i].p_memsz)) {
+            continue;
+        }
+        uint64_t left = ph[i].p_memsz;
+        while (left >= sizeof(ElfW(Nhdr))) {
             const ElfW(Nhdr) *nh = (const ElfW(Nhdr) *)note;
-            const char *name = note + sizeof *nh;
-            const unsigned char *desc = (const unsigned char *)(name + ((nh->n_namesz + 3) & ~3u));
-            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && memcmp(name, "GNU", 4) == 0) {
-                append("\"", 1);
-                for (unsigned j = 0; j < nh->n_descsz; j++) {
-                    append(&"0123456789abcdef"[desc[j] >> 4], 1);
-                    append(&"0123456789abcdef"[desc[j] & 0xf], 1);
-                }
-                append("\"", 1);
-                return;
+            uint64_t name_size = note_align(nh->n_namesz);
+            uint64_t desc_size = note_align(nh->n_descsz);
+            left -= sizeof *nh;
+            if (name_size > left || desc_size > left - name_size) {
+                break;
             }
-            note = (const char *)desc + ((nh->n_descsz + 3) & ~3u);
+            const char *name = (const char *)(note + sizeof *nh);
+            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && memcmp(name, "GNU", 4) == 0) {
+                if (nh->n_descsz > MAX_BUILD_ID) {
+                    return NULL;
+                }
+                *len = nh->n_descsz;
+                return (const unsigned char *)name + name_size;
+            }
+            note += sizeof *nh + name_size + desc_size;
+            left -= name_size + desc_size;
         }
     }
-    append_str("null");
+    return NULL;
+}
+
+static void append_build_id(const struct module *mod)
+{
+    size_t len;
+    const unsigned char *id = find_build_id(mod, &len);
+    if (!id) {
+        append_str("null");
+        return;
+    }
+    append("\"", 1);
+    for (size_t i = 0; i < len; i++) {
+        append(&"0123456789abcdef"[id[i] >> 4], 1);
+        append(&"0123456789abcdef"[id[i] & 0xf], 1);
+    }
+    append("\"", 1);
 }
 
 struct location {

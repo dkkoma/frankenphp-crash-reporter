@@ -7,7 +7,7 @@ hooks=http://127.0.0.1:8081
 failures=0
 
 export CRASH_REPORTER_TEST_HOOKS=127.0.0.1:8081
-echo /usr/local/lib/trigger.so > /etc/ld.so.preload
+printf '%s\n' /usr/local/lib/trigger.so /usr/local/lib/oversized-note.so > /etc/ld.so.preload
 
 fail() {
     echo "NG: $1"
@@ -132,7 +132,15 @@ fi
 if start "SIGSEGV on a PHP thread"; then
     crash "$url?crash=segv"
     expect_status 139
-    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+' \
+        '"/usr/local/lib/trigger.so":"' '"/usr/local/lib/libphp.so":"' '"/usr/local/bin/frankenphp":"'
+    finish
+fi
+
+if start "SIGSEGV in a module whose build ID note claims an oversized ID"; then
+    crash "$url?crash_in_oversized_note=segv"
+    expect_status 139
+    expect_report '"signal":11,' '"pc":"/usr/local/lib/oversized-note.so+' '"/usr/local/lib/oversized-note.so":null'
     finish
 fi
 
