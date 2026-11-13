@@ -116,37 +116,44 @@ usually corrupted earlier, and the crash site is not necessarily the cause.
 
 ## How it works
 
-The Go runtime allows non-Go code in a cgo program to install its own signal
-handlers, provided that the handler runs on the alternate signal stack and that
-signals raised in Go code still reach the Go handler
-(see ["Go programs that use cgo or SWIG"](https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG)).
-This module stays within that contract.
+The reporter never decides by itself whether a signal hit Go code. It relies
+on two behaviors of the Go runtime that are documented for cgo programs
+(see ["Go programs that use cgo or SWIG"](https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG)):
 
-When the package is initialized, after the Go runtime has installed its
-handlers, it:
+- If a handler for SIGSEGV, SIGBUS or SIGFPE is already installed when the Go
+  runtime starts, the runtime saves it and calls it when one of these signals
+  is raised by non-Go code. Signals raised by Go code become panics as usual.
+- A SIGSEGV, SIGBUS or SIGFPE sent with `kill` is not treated as a program
+  error, so the runtime handles it itself.
 
-1. finds the address range that holds Go code,
-2. saves the Go handler for each of the five signals,
-3. installs its own handler with the same mask and flags.
+**SIGSEGV, SIGBUS, SIGFPE.** A C constructor installs the reporting handler
+before the Go runtime starts. When the package is initialized, a second handler
+is placed in front of the Go one. It only records where the signal happened and
+calls the Go handler:
 
-When a signal arrives, the handler looks at the interrupted program counter:
+- Go code: the Go handler turns the signal into a panic. Nothing is printed and
+  the panic stays recoverable.
+- Non-Go code: the Go handler calls the reporting handler, which writes the
+  line and then calls the Go handler again with the signal marked as sent by
+  `kill`. The runtime now handles it itself and ends the process the way it
+  does without the reporter.
 
-- **In Go code** (a nil dereference, for example): the signal goes straight to
-  the Go handler. Panics stay recoverable and nothing is printed.
-- **Outside Go code**: the handler writes the report, then calls the Go handler,
-  which ends the process the way it always does.
+**SIGILL, SIGABRT.** The Go runtime never recovers from these, so no decision is
+needed. A handler placed in front of the Go one writes the line and calls the
+Go handler.
 
-The handler does not allocate, take locks, or call `dladdr`. Modules are
+The handlers do not allocate, take locks, or call `dladdr`. Modules are
 resolved from `/proc/self/maps`, and build IDs are read from the ELF headers
 already mapped in memory. `backtrace()` is called once at install time so that
-its lazy initialization does not happen inside the handler.
+its lazy initialization does not happen inside a handler.
 
 | Crash | Report | How the process ends |
 |---|---|---|
 | C code on a PHP thread or any other thread not created by Go | yes | default action of the signal (exit status 128 + signal) |
-| C code called from a goroutine | yes | Go's fatal error output, exit status 2 |
+| C code called from a goroutine | yes | Go's fatal error output with the goroutine traceback, exit status 2 |
 | Go code (recoverable panic) | no | keeps running |
 | Unrecovered Go panic | no | Go's panic output |
+| Unrecovered Go panic with `GOTRACEBACK=crash` | yes, for the SIGABRT Go sends to itself | Go's panic output, then SIGABRT |
 
 ## Limitations
 
@@ -154,14 +161,13 @@ its lazy initialization does not happen inside the handler.
 - A stack overflow on a thread that has no alternate signal stack leaves no
   line, because the handler has no stack to run on. PHP threads are such
   threads.
-- A crash before the package is initialized is not reported.
-- If another library installs a handler for the same signals later, it replaces
-  this one.
-- A fatal signal sent from outside the process (`kill -SEGV`) is reported only
-  if it happens to interrupt non-Go code.
-- The Go text range is found by probing `runtime.FuncForPC` and is verified at
-  startup. If the check fails, the reporter stays off and prints
-  `crash reporter not armed`.
+- If a handler for SIGSEGV, SIGBUS or SIGFPE is already installed when the
+  program starts (by a preloaded library, for example), the reporter leaves it
+  alone, stays off, and prints `crash reporter not armed`.
+- If another library installs a handler for the same signals after the Go
+  runtime has started, it replaces both the Go handler and this one.
+- When Go code crashes in a way the runtime does not recover from, only the
+  runtime's own output is printed, except for SIGILL and SIGABRT.
 
 ## Testing
 

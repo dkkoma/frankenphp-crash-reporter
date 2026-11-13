@@ -29,11 +29,15 @@
 #define MAX_LINE PIPE_BUF
 #define MAX_BUILD_ID 64
 
-static const int reported_signals[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT};
+#define COUNT(a) (sizeof(a) / sizeof((a)[0]))
+
+static const int recoverable_in_go[] = {SIGSEGV, SIGBUS, SIGFPE};
+static const int always_fatal[] = {SIGILL, SIGABRT};
+
+enum { NOT_INSTALLED, INSTALLED, DISABLED };
 
 static struct sigaction go_actions[NSIG];
-static uintptr_t go_text_start;
-static uintptr_t go_text_end;
+static atomic_int state = NOT_INSTALLED;
 static atomic_int reported;
 static atomic_int report_written;
 static atomic_int reporter_tid;
@@ -46,6 +50,8 @@ static TLS uintptr_t first_return_address;
 static TLS void *first_frames[MAX_FRAMES];
 static TLS int first_frame_count;
 static TLS int first_callers_start;
+static TLS int captured;
+static TLS int handed_back_to_go;
 
 static char maps[1 << 20];
 static size_t maps_len;
@@ -554,48 +560,135 @@ static void capture(int sig, siginfo_t *info, void *ucontext)
     first_return_address = first_callers_start < 0 ? context_return_address(ucontext) : 0;
 }
 
-static int is_go_code(uintptr_t pc)
+static void die_by_default(int sig)
 {
-    return pc >= go_text_start && pc < go_text_end;
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof dfl);
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, NULL);
+
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, sig);
+    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+    raise(sig);
+    kill(getpid(), sig);
+    struct timespec grace = {.tv_sec = 1, .tv_nsec = 0};
+    nanosleep(&grace, NULL);
+    _exit(128 + sig);
 }
 
-static void handler(int sig, siginfo_t *info, void *ucontext)
+static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
 {
-    if (!is_go_code(context_pc(ucontext))) {
-        capture(sig, info, ucontext);
+    if (handed_back_to_go) {
+        die_by_default(sig);
+    }
+    if (atomic_load(&state) != DISABLED) {
+        if (!captured) {
+            capture(sig, info, ucontext);
+        }
         report();
     }
+    if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
+        die_by_default(sig);
+    }
+    handed_back_to_go = 1;
+    siginfo_t sent_by_process = *info;
+    sent_by_process.si_code = SI_USER;
+    go_actions[sig].sa_sigaction(sig, &sent_by_process, ucontext);
+    die_by_default(sig);
+}
+
+static void capture_then_go(int sig, siginfo_t *info, void *ucontext)
+{
+    if (!handed_back_to_go) {
+        capture(sig, info, ucontext);
+        captured = 1;
+    }
+    go_actions[sig].sa_sigaction(sig, info, ucontext);
+    captured = 0;
+}
+
+static void report_then_go(int sig, siginfo_t *info, void *ucontext)
+{
+    capture(sig, info, ucontext);
+    report();
     go_actions[sig].sa_sigaction(sig, info, ucontext);
 }
 
-uintptr_t crash_reporter_c_code_address(void)
+__attribute__((constructor)) static void install_before_go_runtime(void)
 {
-    return (uintptr_t)handler;
-}
-
-int crash_reporter_install(uintptr_t text_start, uintptr_t text_end)
-{
-    size_t count = sizeof reported_signals / sizeof reported_signals[0];
-    for (size_t i = 0; i < count; i++) {
-        int sig = reported_signals[i];
-        if (sigaction(sig, NULL, &go_actions[sig]) != 0) {
-            return -1;
-        }
-        if (!(go_actions[sig].sa_flags & SA_SIGINFO) || !(go_actions[sig].sa_flags & SA_ONSTACK)) {
-            return -1;
+    const char *enabled = getenv("FRANKENPHP_CRASH_REPORTER");
+    if (!enabled || strcmp(enabled, "true") != 0) {
+        return;
+    }
+    for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
+        struct sigaction current;
+        if (sigaction(recoverable_in_go[i], NULL, &current) != 0 || (current.sa_flags & SA_SIGINFO) ||
+            current.sa_handler != SIG_DFL) {
+            return;
         }
     }
-    go_text_start = text_start;
-    go_text_end = text_end;
     void *warm_up[1];
     backtrace(warm_up, 1);
-    for (size_t i = 0; i < count; i++) {
-        int sig = reported_signals[i];
-        struct sigaction ours = go_actions[sig];
-        ours.sa_sigaction = handler;
-        if (sigaction(sig, &ours, NULL) != 0) {
-            return -1;
+    for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
+        struct sigaction ours;
+        memset(&ours, 0, sizeof ours);
+        ours.sa_sigaction = report_non_go_fault;
+        ours.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigfillset(&ours.sa_mask);
+        if (sigaction(recoverable_in_go[i], &ours, NULL) != 0) {
+            atomic_store(&state, DISABLED);
+            return;
         }
     }
-    return 0;
+    atomic_store(&state, INSTALLED);
+}
+
+static int is_ours(const struct sigaction *action)
+{
+    return action->sa_sigaction == report_non_go_fault || action->sa_sigaction == capture_then_go ||
+           action->sa_sigaction == report_then_go;
+}
+
+static int read_go_action(int sig)
+{
+    struct sigaction *go_action = &go_actions[sig];
+    return sigaction(sig, NULL, go_action) == 0 && (go_action->sa_flags & SA_SIGINFO) &&
+           (go_action->sa_flags & SA_ONSTACK) && !is_ours(go_action);
+}
+
+static int chain_before_go(int sig, void (*handler)(int, siginfo_t *, void *))
+{
+    struct sigaction ours = go_actions[sig];
+    ours.sa_sigaction = handler;
+    return sigaction(sig, &ours, NULL) == 0;
+}
+
+enum { ARMED, ERR_NOT_INSTALLED, ERR_GO_HANDLERS };
+
+int crash_reporter_arm(void)
+{
+    if (atomic_load(&state) != INSTALLED) {
+        return ERR_NOT_INSTALLED;
+    }
+    int ok = 1;
+    for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
+        ok = ok && read_go_action(recoverable_in_go[i]);
+    }
+    for (size_t i = 0; i < COUNT(always_fatal); i++) {
+        ok = ok && read_go_action(always_fatal[i]);
+    }
+    for (size_t i = 0; ok && i < COUNT(recoverable_in_go); i++) {
+        ok = chain_before_go(recoverable_in_go[i], capture_then_go);
+    }
+    for (size_t i = 0; ok && i < COUNT(always_fatal); i++) {
+        ok = chain_before_go(always_fatal[i], report_then_go);
+    }
+    if (!ok) {
+        atomic_store(&state, DISABLED);
+        return ERR_GO_HANDLERS;
+    }
+    return ARMED;
 }

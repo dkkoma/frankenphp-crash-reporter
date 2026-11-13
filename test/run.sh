@@ -186,7 +186,7 @@ if start "Go aborts itself after an unrecovered panic"; then
     crash "$hooks/go-panic"
     expect_status 134
     expect_count "panic: test hook" 1
-    expect_count '"message":"fatal signal"' 0
+    expect_report '"signal":6,' '"code":-6,'
     finish
 fi
 
