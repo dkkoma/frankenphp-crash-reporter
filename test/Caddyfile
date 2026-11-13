@@ -1,0 +1,19 @@
+{
+	admin off
+	log default {
+		level WARN
+	}
+	frankenphp {
+		worker {
+			file /crash-reporter-test/worker.php
+			num 4
+		}
+	}
+}
+
+:8080 {
+	root * /crash-reporter-test
+	php_server {
+		try_files {path} worker.php
+	}
+}

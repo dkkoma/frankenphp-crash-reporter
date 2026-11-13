@@ -1,0 +1,48 @@
+name: Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          fmt_result="$(gofmt -l .)"
+          if [ -n "${fmt_result}" ]; then
+            echo "The following files need gofmt:" >&2
+            echo "${fmt_result}" >&2
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          go vet ./...
+          cd testhooks && go vet ./...
+
+  frankenphp:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ ubuntu-latest, ubuntu-24.04-arm ]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Crash FrankenPHP and check the reports
+        run: docker build --progress plain -f test/Dockerfile .
