@@ -349,6 +349,8 @@ if start "abort() in C code called from a Go thread"; then
     finish
 fi
 
+# Fails under amd64 emulation on an arm64 host: the signal raised by the thread
+# arrives with the si_code of a fault ("code":1). It passes on real amd64.
 if start "SIGSEGV sent to a C thread"; then
     crash "$hooks/raise-segv-on-c-thread"
     expect_status 139
