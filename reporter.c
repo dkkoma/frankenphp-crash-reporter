@@ -544,6 +544,14 @@ static void report(void)
     atomic_store(&report_written, 1);
 }
 
+static void allow_next_report(void)
+{
+    if (atomic_load(&reporter_tid) == (int)syscall(SYS_gettid)) {
+        atomic_store(&report_written, 0);
+        atomic_store(&reported, 0);
+    }
+}
+
 static void capture(int sig, siginfo_t *info, void *ucontext)
 {
     first_signal = sig;
@@ -594,6 +602,7 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
     const struct sigaction *previous = &previous_actions[sig];
     if (previous->sa_flags & SA_SIGINFO) {
         previous->sa_sigaction(sig, info, ucontext);
+        allow_next_report();
         return;
     }
     if (previous->sa_handler == SIG_IGN) {
@@ -601,6 +610,7 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
     }
     if (previous->sa_handler != SIG_DFL) {
         previous->sa_handler(sig);
+        allow_next_report();
         return;
     }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {

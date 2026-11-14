@@ -69,7 +69,8 @@ If its startup checks fail, it stays off and says why:
 ## Output
 
 The reporter prints nothing while the process runs normally. On a fatal signal
-outside Go code it writes one line, once per process.
+outside Go code it writes one line. When several threads crash at the same
+time, only the first one is reported.
 
 | Field | Meaning |
 |---|---|
@@ -168,7 +169,7 @@ its lazy initialization does not happen inside a handler.
   threads.
 - If a handler that was installed before the program started recovers from a
   fault instead of ending the process, the line is printed although the
-  process keeps running.
+  process keeps running. A later fault is reported again.
 - If another library installs a handler for the same signals after the Go
   runtime has started, it replaces both the Go handler and this one.
 - When Go code crashes in a way the runtime does not recover from, only the

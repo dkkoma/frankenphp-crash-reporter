@@ -121,6 +121,19 @@ if start "disabled: SIGSEGV on a PHP thread with a handler installed before the 
 fi
 unset LD_PRELOAD
 
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=ignore
+if start "disabled: SIGSEGV on a PHP thread while SIGSEGV was ignored before the program started"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "$case_name: the process ended"
+    fi
+    kill -KILL "$pid"
+    wait "$pid"
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
 export FRANKENPHP_CRASH_REPORTER=true
 
 if start "Go panics from nil dereferences are still recoverable"; then
@@ -168,6 +181,46 @@ if start "SIGSEGV on a PHP thread with a handler installed before the program st
     finish
 fi
 unset LD_PRELOAD
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=plain
+if start "SIGSEGV on a PHP thread with a handler without SA_SIGINFO installed before the program started"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    crash "$url?crash=segv"
+    expect_status 78
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    expect_count "plain previous handler got SIGSEGV" 1
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so
+if start "a handler installed before the program started recovers from a fault, then a second fault is fatal"; then
+    unset LD_PRELOAD
+    expect_body "$url?crash=protected" "ok"
+    expect_count "previous handler recovered from the fault" 1
+    expect_count '"message":"fatal signal"' 1
+    expect_body "$url" "ok"
+    crash "$url?crash=segv"
+    expect_status 77
+    expect_count "previous handler got the original fault" 1
+    expect_count '"message":"fatal signal"' 2
+    finish
+fi
+unset LD_PRELOAD
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=ignore
+if start "SIGSEGV on a PHP thread while SIGSEGV was ignored before the program started"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "$case_name: the process ended"
+    fi
+    expect_count '"message":"fatal signal"' 1
+    kill -KILL "$pid"
+    wait "$pid"
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
 
 if start "call through an unmapped function pointer on a PHP thread"; then
     crash "$url?crash=wildcall"

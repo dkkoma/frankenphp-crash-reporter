@@ -3,12 +3,17 @@
 #include <pwd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 
 int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result)
 {
     if (strcmp(name, "segv") == 0) {
         volatile int *p = 0;
         *p = 1;
+    }
+    if (strcmp(name, "protected") == 0) {
+        volatile int *page = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        *page = 1;
     }
     if (strcmp(name, "wildcall") == 0) {
         void (*volatile unmapped)(void) = (void (*)(void))0x10;
