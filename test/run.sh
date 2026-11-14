@@ -110,6 +110,17 @@ if start "disabled: SIGSEGV in C code of the frankenphp binary on a C thread"; t
     finish
 fi
 
+export LD_PRELOAD=/usr/local/lib/previous-handler.so
+if start "disabled: SIGSEGV on a PHP thread with a handler installed before the program started"; then
+    unset LD_PRELOAD
+    crash "$url?crash=segv"
+    expect_status 77
+    expect_count "previous handler got the original fault" 1
+    expect_count '"message":"fatal signal"' 0
+    finish
+fi
+unset LD_PRELOAD
+
 export FRANKENPHP_CRASH_REPORTER=true
 
 if start "Go panics from nil dereferences are still recoverable"; then
@@ -143,6 +154,20 @@ if start "SIGSEGV in a module whose build ID note claims an oversized ID"; then
     expect_report '"signal":11,' '"pc":"/usr/local/lib/oversized-note.so+' '"/usr/local/lib/oversized-note.so":null'
     finish
 fi
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so
+if start "SIGSEGV on a PHP thread with a handler installed before the program started"; then
+    unset LD_PRELOAD
+    expect_body "$hooks/go-nil" "recovered=1"
+    expect_body "$hooks/go-nil-on-c-thread" "recovered=1"
+    crash "$url?crash=segv"
+    expect_status 77
+    expect_count "crash reporter armed" 1
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    expect_count "previous handler got the original fault" 1
+    finish
+fi
+unset LD_PRELOAD
 
 if start "call through an unmapped function pointer on a PHP thread"; then
     crash "$url?crash=wildcall"

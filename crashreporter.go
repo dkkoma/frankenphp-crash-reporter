@@ -21,7 +21,7 @@ func init() {
 	case 0:
 		logLine("INFO", "crash reporter armed")
 	case 1:
-		logLine("WARNING", "crash reporter not armed: a handler for SIGSEGV, SIGBUS or SIGFPE was already installed when the program started")
+		logLine("WARNING", "crash reporter not armed: the handlers could not be installed before the Go runtime started")
 	default:
 		logLine("WARNING", "crash reporter not armed: the Go signal handlers are not installed as expected")
 	}

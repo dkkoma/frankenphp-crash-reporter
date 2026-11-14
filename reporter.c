@@ -37,6 +37,7 @@ static const int always_fatal[] = {SIGILL, SIGABRT};
 enum { NOT_INSTALLED, INSTALLED, DISABLED };
 
 static struct sigaction go_actions[NSIG];
+static struct sigaction previous_actions[NSIG];
 static atomic_int state = NOT_INSTALLED;
 static atomic_int reported;
 static atomic_int report_written;
@@ -590,6 +591,18 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
         }
         report();
     }
+    const struct sigaction *previous = &previous_actions[sig];
+    if (previous->sa_flags & SA_SIGINFO) {
+        previous->sa_sigaction(sig, info, ucontext);
+        return;
+    }
+    if (previous->sa_handler == SIG_IGN) {
+        return;
+    }
+    if (previous->sa_handler != SIG_DFL) {
+        previous->sa_handler(sig);
+        return;
+    }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
         die_by_default(sig);
     }
@@ -623,13 +636,6 @@ __attribute__((constructor)) static void install_before_go_runtime(void)
     if (!enabled || strcmp(enabled, "true") != 0) {
         return;
     }
-    for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
-        struct sigaction current;
-        if (sigaction(recoverable_in_go[i], NULL, &current) != 0 || (current.sa_flags & SA_SIGINFO) ||
-            current.sa_handler != SIG_DFL) {
-            return;
-        }
-    }
     void *warm_up[1];
     backtrace(warm_up, 1);
     for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
@@ -638,7 +644,8 @@ __attribute__((constructor)) static void install_before_go_runtime(void)
         ours.sa_sigaction = report_non_go_fault;
         ours.sa_flags = SA_SIGINFO | SA_ONSTACK;
         sigfillset(&ours.sa_mask);
-        if (sigaction(recoverable_in_go[i], &ours, NULL) != 0) {
+        int sig = recoverable_in_go[i];
+        if (sigaction(sig, &ours, &previous_actions[sig]) != 0) {
             atomic_store(&state, DISABLED);
             return;
         }

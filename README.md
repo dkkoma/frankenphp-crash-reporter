@@ -138,6 +138,11 @@ calls the Go handler:
   `kill`. The runtime now handles it itself and ends the process the way it
   does without the reporter.
 
+If a handler for one of these signals was already installed when the program
+started (by a preloaded library, for example), the reporting handler calls it
+after writing the line instead of going back to the Go handler. That is the
+handler the Go runtime would have called without the reporter.
+
 **SIGILL, SIGABRT.** The Go runtime never recovers from these, so no decision is
 needed. A handler placed in front of the Go one writes the line and calls the
 Go handler.
@@ -161,9 +166,9 @@ its lazy initialization does not happen inside a handler.
 - A stack overflow on a thread that has no alternate signal stack leaves no
   line, because the handler has no stack to run on. PHP threads are such
   threads.
-- If a handler for SIGSEGV, SIGBUS or SIGFPE is already installed when the
-  program starts (by a preloaded library, for example), the reporter leaves it
-  alone, stays off, and prints `crash reporter not armed`.
+- If a handler that was installed before the program started recovers from a
+  fault instead of ending the process, the line is printed although the
+  process keeps running.
 - If another library installs a handler for the same signals after the Go
   runtime has started, it replaces both the Go handler and this one.
 - When Go code crashes in a way the runtime does not recover from, only the
