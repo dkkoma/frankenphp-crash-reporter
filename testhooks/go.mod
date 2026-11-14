@@ -1,3 +1,3 @@
 module github.com/dkkoma/frankenphp-crash-reporter/testhooks
 
-go 1.25
+go 1.26
