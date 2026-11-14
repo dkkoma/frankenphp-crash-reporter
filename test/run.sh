@@ -121,6 +121,16 @@ if start "disabled: SIGSEGV on a PHP thread with a handler installed before the 
 fi
 unset LD_PRELOAD
 
+export LD_PRELOAD=/usr/local/lib/previous-handler.so
+if start "disabled: abort() on a PHP thread with a handler installed before the program started"; then
+    unset LD_PRELOAD
+    crash "$url?crash=abort"
+    expect_status 79
+    expect_count "previous handler got SIGABRT" 1
+    finish
+fi
+unset LD_PRELOAD
+
 export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=ignore
 if start "disabled: SIGSEGV on a PHP thread while SIGSEGV was ignored before the program started"; then
     unset LD_PRELOAD PREVIOUS_HANDLER
@@ -178,6 +188,17 @@ if start "SIGSEGV on a PHP thread with a handler installed before the program st
     expect_count "crash reporter armed" 1
     expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
     expect_count "previous handler got the original fault" 1
+    finish
+fi
+unset LD_PRELOAD
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so
+if start "abort() on a PHP thread with a handler installed before the program started"; then
+    unset LD_PRELOAD
+    crash "$url?crash=abort"
+    expect_status 79
+    expect_report '"signal":6,' '"thread":"php-' '/usr/local/lib/trigger.so+'
+    expect_count "previous handler got SIGABRT" 1
     finish
 fi
 unset LD_PRELOAD

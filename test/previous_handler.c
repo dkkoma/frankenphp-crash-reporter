@@ -22,6 +22,10 @@ static int make_writable(void *addr)
 static void siginfo_handler(int sig, siginfo_t *info, void *ucontext)
 {
     (void)ucontext;
+    if (sig == SIGABRT) {
+        say("previous handler got SIGABRT\n");
+        _exit(79);
+    }
     if (sig == SIGSEGV && info->si_code > 0 && make_writable(info->si_addr)) {
         say("previous handler recovered from the fault\n");
         return;
@@ -52,6 +56,7 @@ __attribute__((constructor)) static void install(void)
     } else {
         action.sa_sigaction = siginfo_handler;
         action.sa_flags = SA_SIGINFO;
+        sigaction(SIGABRT, &action, NULL);
     }
     sigaction(SIGSEGV, &action, NULL);
 }
