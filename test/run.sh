@@ -276,6 +276,13 @@ if start "SIGSEGV in C code of the frankenphp binary on a C thread"; then
     finish
 fi
 
+if start "SIGSEGV in C code on a thread that recovered from a Go panic just before"; then
+    crash "$hooks/go-nil-then-segv-on-c-thread"
+    expect_status 139
+    expect_report '"signal":11,' '"fault_addr":"0x10",' '"pc":"/usr/local/bin/frankenphp+'
+    finish
+fi
+
 if start "SIGSEGV in C code called from a Go thread"; then
     crash "$hooks/segv-in-cgo"
     expect_status 2

@@ -27,6 +27,15 @@ static void *segv_thread(void *arg)
     return NULL;
 }
 
+static void *go_nil_then_segv_thread(void *arg)
+{
+    (void)arg;
+    goNilDeref();
+    volatile int *p = (int *)0x10;
+    *p = 1;
+    return NULL;
+}
+
 static void *go_nil_thread(void *arg)
 {
     *(int *)arg = goNilDeref();
@@ -54,6 +63,11 @@ int test_hooks_go_nil_on_c_thread(void)
         return -1;
     }
     return recovered;
+}
+
+int test_hooks_go_nil_then_segv_on_c_thread(void)
+{
+    return run_thread(go_nil_then_segv_thread, NULL);
 }
 
 int test_hooks_ill_on_c_thread(void)

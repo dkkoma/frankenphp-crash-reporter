@@ -5,6 +5,7 @@ void test_hooks_segv(void);
 int test_hooks_segv_on_c_thread(void);
 int test_hooks_go_nil_on_c_thread(void);
 int test_hooks_ill_on_c_thread(void);
+int test_hooks_go_nil_then_segv_on_c_thread(void);
 */
 import "C"
 
@@ -33,6 +34,9 @@ func init() {
 	})
 	mux.HandleFunc("/segv-on-c-thread", func(http.ResponseWriter, *http.Request) {
 		C.test_hooks_segv_on_c_thread()
+	})
+	mux.HandleFunc("/go-nil-then-segv-on-c-thread", func(http.ResponseWriter, *http.Request) {
+		C.test_hooks_go_nil_then_segv_on_c_thread()
 	})
 	mux.HandleFunc("/ill-on-c-thread", func(http.ResponseWriter, *http.Request) {
 		C.test_hooks_ill_on_c_thread()
