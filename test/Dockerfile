@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         --with github.com/dunglas/frankenphp/caddy=./caddy/ \
         --with github.com/dkkoma/frankenphp-crash-reporter=/src/crash-reporter \
         --with github.com/dkkoma/frankenphp-crash-reporter/testhooks=/src/crash-reporter/testhooks \
-    && gcc -O2 -fPIC -shared -Wall -Wextra -o /trigger.so /tmp/trigger.c -ldl \
+    && gcc -O2 -fPIC -shared -Wall -Wextra -fno-omit-frame-pointer -fstack-protector-all -U_FORTIFY_SOURCE -o /trigger.so /tmp/trigger.c -ldl \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /oversized-note.so /tmp/oversized_note.c -ldl \
     && note_offset="$(objdump -h /oversized-note.so | awk '$2 == ".note.gnu.build-id" { print $6 }')" \
     && printf '\000\100\000\000' | dd of=/oversized-note.so bs=1 seek="$((0x${note_offset:?} + 4))" conv=notrunc \

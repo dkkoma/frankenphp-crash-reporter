@@ -18,7 +18,11 @@ start() {
     echo "== $1"
     case_name=$1
     failures_before=$failures
-    frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile > "$log" 2>&1 &
+    if [ -n "${stderr_fifo:-}" ]; then
+        frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile > /dev/null 2> "$stderr_fifo" &
+    else
+        frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile > "$log" 2>&1 &
+    fi
     pid=$!
     for _ in $(seq 1 300); do
         if curl -fs -o /dev/null "$url" && curl -s -o /dev/null "$hooks/"; then
@@ -186,6 +190,13 @@ if start "disabled: SIGSEGV sent to a C thread"; then
     finish
 fi
 
+if start "disabled: stack buffer overflow detected on a PHP thread"; then
+    crash "$url?crash=stack_buffer_overflow"
+    expect_status 134
+    expect_count "stack smashing detected" 1
+    finish
+fi
+
 export FRANKENPHP_CRASH_REPORTER=true
 
 if start "Go panics from nil dereferences are still recoverable"; then
@@ -212,6 +223,52 @@ if start "SIGSEGV on a PHP thread"; then
         '"/usr/local/lib/trigger.so":"' '"/usr/local/lib/libphp.so":"' '"/usr/local/bin/frankenphp":"'
     finish
 fi
+
+if start "stack overflow on a PHP thread"; then
+    crash "$url?crash=stack_overflow"
+    expect_status 139
+    expect_report '"signal":11,' '"code":2,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    finish
+fi
+
+if start "SIGSEGV on a PHP thread whose return address was overwritten"; then
+    crash "$url?crash=overwritten_return_address"
+    expect_status 139
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    finish
+fi
+
+if start "stack buffer overflow detected on a PHP thread"; then
+    crash "$url?crash=stack_buffer_overflow"
+    expect_status 134
+    expect_count "stack smashing detected" 1
+    expect_report '"signal":6,' '"thread":"php-' '/usr/local/lib/trigger.so+'
+    finish
+fi
+
+stderr_fifo=/tmp/stderr.fifo
+rm -f "$stderr_fifo"
+mkfifo "$stderr_fifo"
+cat "$stderr_fifo" > "$log" &
+if start "SIGSEGV on a PHP thread while stderr is a pipe"; then
+    crash "$url?crash=segv"
+    wait
+    expect_status 139
+    expect_report '"signal":11,' '"thread":"php-'
+    finish
+fi
+
+sleep 1000 < "$stderr_fifo" &
+stuck_reader=$!
+if start "SIGSEGV on a PHP thread while nobody reads the pipe on stderr"; then
+    timeout 2 sh -c "cat /dev/zero > $stderr_fifo"
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    wait_exit
+    expect_status 139
+fi
+kill "$stuck_reader"
+rm -f "$stderr_fifo"
+unset stderr_fifo
 
 if start "SIGSEGV in a module whose build ID note claims an oversized ID"; then
     crash "$url?crash_in_oversized_note=segv"
@@ -270,6 +327,20 @@ if start "a handler installed before the program started recovers from a fault, 
     finish
 fi
 unset LD_PRELOAD
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=probe
+if start "a handler installed before the program started jumps out of a fault, then a second fault is fatal"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    expect_body "$url?crash=probe" "ok"
+    expect_count "previous handler jumps out of the probe" 1
+    expect_count '"message":"fatal signal"' 1
+    crash "$url?crash=segv"
+    expect_status 77
+    expect_count "previous handler got a fault outside a probe" 1
+    expect_count '"message":"fatal signal"' 2
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
 
 export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=ignore
 if start "SIGSEGV on a PHP thread while SIGSEGV was ignored before the program started"; then

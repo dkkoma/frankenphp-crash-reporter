@@ -5,12 +5,12 @@
 #endif
 #include <elf.h>
 #include <errno.h>
-#include <execinfo.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <link.h>
 #include <poll.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -22,6 +22,7 @@
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
+#include <unwind.h>
 
 #define TLS __thread __attribute__((tls_model("initial-exec")))
 #define MAX_FRAMES 64
@@ -53,6 +54,8 @@ static TLS int first_frame_count;
 static TLS int first_callers_start;
 static TLS int captured;
 static TLS int handed_back_to_go;
+static TLS volatile sig_atomic_t unwinding;
+static TLS sigjmp_buf unwind_faulted;
 
 static char maps[1 << 20];
 static size_t maps_len;
@@ -70,15 +73,6 @@ static uintptr_t context_pc(void *ucontext)
     (void)uc;
     return 0;
 #endif
-}
-
-static int is_readable(uintptr_t addr, size_t len)
-{
-    char buf[16];
-    struct iovec local = {.iov_base = buf, .iov_len = len};
-    struct iovec remote = {.iov_base = (void *)addr, .iov_len = len};
-    ssize_t n = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
-    return n == (ssize_t)len || (n < 0 && errno != EFAULT);
 }
 
 static uintptr_t context_return_address(void *ucontext)
@@ -429,17 +423,16 @@ static void append_location(const struct location *loc, struct module *modules, 
 
 static void write_all(const char *buf, size_t len)
 {
-    int waits_left = 10;
-    for (size_t written = 0; written < len;) {
+    size_t written = 0;
+    for (int attempts = 10; written < len && attempts > 0; attempts--) {
+        struct pollfd fd = {.fd = STDERR_FILENO, .events = POLLOUT};
+        if (poll(&fd, 1, 100) <= 0) {
+            continue;
+        }
         ssize_t n = write(STDERR_FILENO, buf + written, len - written);
         if (n > 0) {
             written += (size_t)n;
-        } else if (n < 0 && errno == EINTR) {
-            continue;
-        } else if (n < 0 && errno == EAGAIN && waits_left-- > 0) {
-            struct pollfd fd = {.fd = STDERR_FILENO, .events = POLLOUT};
-            poll(&fd, 1, 100);
-        } else {
+        } else if (n < 0 && errno != EINTR && errno != EAGAIN) {
             return;
         }
     }
@@ -552,13 +545,42 @@ static void allow_next_report(void)
     }
 }
 
+static _Unwind_Reason_Code record_frame(struct _Unwind_Context *context, void *unused)
+{
+    (void)unused;
+    if (first_frame_count == MAX_FRAMES) {
+        return _URC_END_OF_STACK;
+    }
+    first_frames[first_frame_count++] = (void *)_Unwind_GetIP(context);
+    return _URC_NO_REASON;
+}
+
+static void walk_stack(void)
+{
+    sigset_t faults, blocked;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
+    first_frame_count = 0;
+    if (sigsetjmp(unwind_faulted, 1) == 0) {
+        unwinding = 1;
+        pthread_sigmask(SIG_UNBLOCK, &faults, &blocked);
+        _Unwind_Backtrace(record_frame, NULL);
+        pthread_sigmask(SIG_SETMASK, &blocked, NULL);
+    }
+    unwinding = 0;
+    if (first_frame_count > 0 && first_frames[first_frame_count - 1] == NULL) {
+        first_frame_count--;
+    }
+}
+
 static void capture(int sig, siginfo_t *info, void *ucontext)
 {
     first_signal = sig;
     first_code = info->si_code;
     first_fault_addr = info->si_addr;
     first_pc = context_pc(ucontext);
-    first_frame_count = is_readable(first_pc, 16) ? backtrace(first_frames, MAX_FRAMES) : 0;
+    walk_stack();
     first_callers_start = -1;
     for (int i = 0; i + 1 < first_frame_count; i++) {
         if ((uintptr_t)first_frames[i] == first_pc) {
@@ -590,6 +612,9 @@ static void die_by_default(int sig)
 
 static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
 {
+    if (unwinding) {
+        siglongjmp(unwind_faulted, 1);
+    }
     if (handed_back_to_go) {
         die_by_default(sig);
     }
@@ -601,16 +626,16 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
     }
     const struct sigaction *previous = &previous_actions[sig];
     if (previous->sa_flags & SA_SIGINFO) {
-        previous->sa_sigaction(sig, info, ucontext);
         allow_next_report();
+        previous->sa_sigaction(sig, info, ucontext);
         return;
     }
     if (previous->sa_handler == SIG_IGN) {
         return;
     }
     if (previous->sa_handler != SIG_DFL) {
-        previous->sa_handler(sig);
         allow_next_report();
+        previous->sa_handler(sig);
         return;
     }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
@@ -625,6 +650,9 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
 
 static void capture_then_go(int sig, siginfo_t *info, void *ucontext)
 {
+    if (unwinding) {
+        siglongjmp(unwind_faulted, 1);
+    }
     if (!handed_back_to_go) {
         capture(sig, info, ucontext);
         captured = 1;
@@ -646,8 +674,7 @@ __attribute__((constructor)) static void install_before_go_runtime(void)
     if (!enabled || strcmp(enabled, "true") != 0) {
         return;
     }
-    void *warm_up[1];
-    backtrace(warm_up, 1);
+    walk_stack();
     for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
         struct sigaction ours;
         memset(&ours, 0, sizeof ours);

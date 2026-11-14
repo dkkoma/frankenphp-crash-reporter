@@ -25,7 +25,7 @@ unchanged.
 ## Requirements
 
 - Linux, amd64 or arm64
-- glibc (the module uses `backtrace()` from `<execinfo.h>`, which musl does not provide)
+- glibc. musl is not tested
 - cgo, which a FrankenPHP build already requires
 
 ## Tested FrankenPHP versions
@@ -98,6 +98,13 @@ The line is at most 4096 bytes (`PIPE_BUF`) and is written with a single
 `write(2)`, so it does not interleave with log lines from other threads when
 stderr is a pipe.
 
+If stderr does not become writable within about a second (a full pipe that
+nobody reads, for example), the line is dropped and the process ends without
+it.
+
+When the stack of the crashed thread is corrupted, `callers` holds the frames
+that could be read before the corrupted part.
+
 ## Finding the crash site
 
 1. Get a copy of the module named in `pc` that has debug information, and check
@@ -159,13 +166,13 @@ Go handler.
 
 The handlers do not allocate, take locks, or call `dladdr`. Modules are
 resolved from `/proc/self/maps`, and build IDs are read from the ELF headers
-already mapped in memory. `backtrace()` is called once at install time so that
-its lazy initialization does not happen inside a handler.
+already mapped in memory. The stack is walked once at install time so that the
+lazy initialization of the unwinder does not happen inside a handler.
 
 | Crash | Report | How the process ends |
 |---|---|---|
 | C code on a PHP thread or any other thread not created by Go | yes | default action of the signal (exit status 128 + signal) |
-| C code called from a goroutine | yes | Go's fatal error output with the goroutine traceback, exit status 2 |
+| C code called from a goroutine | yes | Go's fatal error output with the goroutine traceback, exit status 2. The output shows `sigcode=0` instead of the code of the fault |
 | Go code (recoverable panic) | no | keeps running |
 | Unrecovered Go panic | no | Go's panic output |
 | Unrecovered Go panic with `GOTRACEBACK=crash` | yes, for the SIGABRT Go sends to itself | Go's panic output, then SIGABRT |
@@ -174,8 +181,10 @@ its lazy initialization does not happen inside a handler.
 
 - SIGKILL cannot be caught, so an out-of-memory kill leaves no line.
 - A stack overflow on a thread that has no alternate signal stack leaves no
-  line, because the handler has no stack to run on. PHP threads are such
-  threads.
+  line, because the handler has no stack to run on. The Go runtime gives an
+  alternate signal stack to every thread that has called into Go, which
+  includes FrankenPHP's PHP threads. A thread created in C that never calls
+  into Go has none unless it sets one up.
 - If a handler that was installed before the program started recovers from a
   fault instead of ending the process, the line is printed although the
   process keeps running. A later fault is reported again.
