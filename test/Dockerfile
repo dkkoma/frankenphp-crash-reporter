@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 ARG FRANKENPHP_IMAGE=dunglas/frankenphp
+ARG FRANKENPHP_VERSION=1.13.5
 
-FROM ${FRANKENPHP_IMAGE}:builder AS builder
+FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}-builder AS builder
 
 COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
 COPY . /src/crash-reporter/
@@ -28,7 +29,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && readelf -n /oversized-note.so 2>&1 | head -5 \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /previous-handler.so /tmp/previous_handler.c
 
-FROM ${FRANKENPHP_IMAGE}
+FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}
 
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
 COPY --from=builder /trigger.so /usr/local/lib/trigger.so

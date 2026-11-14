@@ -28,6 +28,16 @@ unchanged.
 - glibc (the module uses `backtrace()` from `<execinfo.h>`, which musl does not provide)
 - cgo, which a FrankenPHP build already requires
 
+## Tested FrankenPHP versions
+
+| FrankenPHP | amd64 | arm64 |
+|---|---|---|
+| 1.13.5 | ✅ | ✅ |
+
+These are the versions the [test workflow](.github/workflows/test.yml) runs
+against. The reporter depends on how the Go runtime and FrankenPHP handle
+signals, so a version that is not listed may behave differently.
+
 On other platforms the package compiles to nothing.
 
 ## Installation
@@ -190,6 +200,9 @@ checks the output and the exit status. It needs only Docker:
 ```sh
 docker build --progress plain -f test/Dockerfile .
 ```
+
+To test against another FrankenPHP version, pass
+`--build-arg FRANKENPHP_VERSION=<version>`.
 
 The `testhooks` directory is a separate Go module that exposes HTTP endpoints
 to crash the process from Go and from C code inside the FrankenPHP binary. It is

@@ -36,13 +36,15 @@ jobs:
           cd testhooks && go vet ./...
 
   frankenphp:
+    name: FrankenPHP ${{ matrix.frankenphp }} (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
+        frankenphp: [ '1.13.5' ]
         runner: [ ubuntu-latest, ubuntu-24.04-arm ]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Crash FrankenPHP and check the reports
-        run: docker build --progress plain -f test/Dockerfile .
+        run: docker build --progress plain --build-arg FRANKENPHP_VERSION=${{ matrix.frankenphp }} -f test/Dockerfile .
