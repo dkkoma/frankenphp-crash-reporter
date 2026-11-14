@@ -6,6 +6,9 @@ int test_hooks_segv_on_c_thread(void);
 int test_hooks_go_nil_on_c_thread(void);
 int test_hooks_ill_on_c_thread(void);
 int test_hooks_go_nil_then_segv_on_c_thread(void);
+void test_hooks_abort(void);
+int test_hooks_raise_segv_on_c_thread(void);
+int test_hooks_segv_on_two_c_threads(void);
 */
 import "C"
 
@@ -49,6 +52,18 @@ func init() {
 				os.Stderr.WriteString("os/signal delivered SIGSEGV\n")
 			}
 		}()
+	})
+	mux.HandleFunc("/ignore-segv", func(http.ResponseWriter, *http.Request) {
+		signal.Ignore(syscall.SIGSEGV)
+	})
+	mux.HandleFunc("/abort-in-cgo", func(http.ResponseWriter, *http.Request) {
+		C.test_hooks_abort()
+	})
+	mux.HandleFunc("/raise-segv-on-c-thread", func(http.ResponseWriter, *http.Request) {
+		C.test_hooks_raise_segv_on_c_thread()
+	})
+	mux.HandleFunc("/segv-on-two-c-threads", func(http.ResponseWriter, *http.Request) {
+		C.test_hooks_segv_on_two_c_threads()
 	})
 	mux.HandleFunc("/go-panic", func(http.ResponseWriter, *http.Request) {
 		go panic("test hook")

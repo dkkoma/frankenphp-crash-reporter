@@ -163,6 +163,29 @@ if start "disabled: SIGSEGV on a PHP thread while os/signal subscribes to SIGSEG
     finish
 fi
 
+if start "disabled: SIGSEGV in C code called from a Go thread while os/signal ignores SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/ignore-segv"
+    crash "$hooks/segv-in-cgo"
+    expect_status 2
+    expect_count "signal arrived during cgo execution" 1
+    finish
+fi
+
+if start "disabled: abort() in C code called from a Go thread"; then
+    crash "$hooks/abort-in-cgo"
+    expect_status 2
+    expect_count "SIGABRT: abort" 1
+    expect_count "signal arrived during cgo execution" 1
+    finish
+fi
+
+if start "disabled: SIGSEGV sent to a C thread"; then
+    crash "$hooks/raise-segv-on-c-thread"
+    expect_status 139
+    expect_count '"message":"fatal signal"' 0
+    finish
+fi
+
 export FRANKENPHP_CRASH_REPORTER=true
 
 if start "Go panics from nil dereferences are still recoverable"; then
@@ -305,6 +328,38 @@ if start "SIGSEGV on a PHP thread while os/signal subscribes to SIGSEGV"; then
     crash "$url?crash=segv"
     expect_status 139
     expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    finish
+fi
+
+if start "SIGSEGV in C code called from a Go thread while os/signal ignores SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/ignore-segv"
+    crash "$hooks/segv-in-cgo"
+    expect_status 139
+    expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
+    expect_count "signal arrived during cgo execution" 0
+    finish
+fi
+
+if start "abort() in C code called from a Go thread"; then
+    crash "$hooks/abort-in-cgo"
+    expect_status 2
+    expect_report '"signal":6,' '"code":-6,' '/usr/local/bin/frankenphp+'
+    expect_count "SIGABRT: abort" 1
+    expect_count "signal arrived during cgo execution" 1
+    finish
+fi
+
+if start "SIGSEGV sent to a C thread"; then
+    crash "$hooks/raise-segv-on-c-thread"
+    expect_status 139
+    expect_report '"signal":11,' '"code":-6,' '"fault_addr":null,'
+    finish
+fi
+
+if start "SIGSEGV on two C threads at the same time"; then
+    crash "$hooks/segv-on-two-c-threads"
+    expect_status 139
+    expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
     finish
 fi
 

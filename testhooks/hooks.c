@@ -1,4 +1,6 @@
 #include <pthread.h>
+#include <signal.h>
+#include <stdlib.h>
 #include <stddef.h>
 
 extern int goNilDeref(void);
@@ -23,6 +25,20 @@ static void *ill_thread(void *arg)
 static void *segv_thread(void *arg)
 {
     (void)arg;
+    test_hooks_segv();
+    return NULL;
+}
+
+static void *raise_segv_thread(void *arg)
+{
+    (void)arg;
+    raise(SIGSEGV);
+    return NULL;
+}
+
+static void *segv_after_barrier_thread(void *arg)
+{
+    pthread_barrier_wait(arg);
     test_hooks_segv();
     return NULL;
 }
@@ -68,6 +84,34 @@ int test_hooks_go_nil_on_c_thread(void)
 int test_hooks_go_nil_then_segv_on_c_thread(void)
 {
     return run_thread(go_nil_then_segv_thread, NULL);
+}
+
+void test_hooks_abort(void)
+{
+    abort();
+}
+
+int test_hooks_raise_segv_on_c_thread(void)
+{
+    return run_thread(raise_segv_thread, NULL);
+}
+
+int test_hooks_segv_on_two_c_threads(void)
+{
+    pthread_barrier_t barrier;
+    pthread_t threads[2];
+    if (pthread_barrier_init(&barrier, NULL, 2) != 0) {
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (pthread_create(&threads[i], NULL, segv_after_barrier_thread, &barrier) != 0) {
+            return -1;
+        }
+    }
+    for (int i = 0; i < 2; i++) {
+        pthread_join(threads[i], NULL);
+    }
+    return 0;
 }
 
 int test_hooks_ill_on_c_thread(void)
