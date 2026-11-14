@@ -2,6 +2,8 @@ name: Test
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 21 * * *'
   push:
     branches: [ main ]
   pull_request:
@@ -36,15 +38,20 @@ jobs:
           cd testhooks && go vet ./...
 
   frankenphp:
-    name: FrankenPHP ${{ matrix.frankenphp }} (${{ matrix.runner }})
+    name: FrankenPHP 1.x (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
-        frankenphp: [ '1.13.5' ]
         runner: [ ubuntu-latest, ubuntu-24.04-arm ]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
 
       - name: Crash FrankenPHP and check the reports
-        run: docker build --progress plain --build-arg FRANKENPHP_VERSION=${{ matrix.frankenphp }} -f test/Dockerfile .
+        run: |
+          set -o pipefail
+          docker build --pull --progress plain -f test/Dockerfile . 2>&1 | tee build.log
+
+      - name: Show the FrankenPHP version under test
+        if: always()
+        run: grep -m1 -o 'FrankenPHP v[^ ]* PHP [^ ]* Caddy v[^ ]*' build.log >> "$GITHUB_STEP_SUMMARY"

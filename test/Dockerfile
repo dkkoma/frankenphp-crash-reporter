@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG FRANKENPHP_IMAGE=dunglas/frankenphp
-ARG FRANKENPHP_VERSION=1.13.5
+ARG FRANKENPHP_VERSION=1
 
 FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}-builder AS builder
 
@@ -30,6 +30,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /previous-handler.so /tmp/previous_handler.c
 
 FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}
+
+RUN frankenphp version
 
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
 COPY --from=builder /trigger.so /usr/local/lib/trigger.so

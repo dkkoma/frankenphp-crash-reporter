@@ -30,15 +30,14 @@ unchanged.
 
 ## Tested FrankenPHP versions
 
-| FrankenPHP | amd64 | arm64 |
-|---|---|---|
-| 1.13.5 | ✅ | ✅ |
+[![Test](https://github.com/dkkoma/frankenphp-crash-reporter/actions/workflows/test.yml/badge.svg)](https://github.com/dkkoma/frankenphp-crash-reporter/actions/workflows/test.yml)
 
-These are the versions the [test workflow](.github/workflows/test.yml) runs
-against. The reporter depends on how the Go runtime and FrankenPHP handle
-signals, so a version that is not listed may behave differently.
+The [test workflow](.github/workflows/test.yml) runs every day against the
+latest FrankenPHP 1.x release, on amd64 and arm64. The summary of each run shows
+the version it tested. Older releases are not tested.
 
-On other platforms the package compiles to nothing.
+The reporter depends on how the Go runtime and FrankenPHP handle signals, so a
+release the workflow has not passed on may behave differently.
 
 ## Installation
 
@@ -198,10 +197,10 @@ The test builds FrankenPHP with this module, crashes it in several ways, and
 checks the output and the exit status. It needs only Docker:
 
 ```sh
-docker build --progress plain -f test/Dockerfile .
+docker build --pull --progress plain -f test/Dockerfile .
 ```
 
-To test against another FrankenPHP version, pass
+This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.
 
 The `testhooks` directory is a separate Go module that exposes HTTP endpoints
