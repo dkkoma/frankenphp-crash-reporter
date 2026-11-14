@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func init() {
@@ -34,6 +36,15 @@ func init() {
 	})
 	mux.HandleFunc("/ill-on-c-thread", func(http.ResponseWriter, *http.Request) {
 		C.test_hooks_ill_on_c_thread()
+	})
+	mux.HandleFunc("/notify-segv", func(http.ResponseWriter, *http.Request) {
+		notified := make(chan os.Signal, 1)
+		signal.Notify(notified, syscall.SIGSEGV)
+		go func() {
+			for range notified {
+				os.Stderr.WriteString("os/signal delivered SIGSEGV\n")
+			}
+		}()
 	})
 	mux.HandleFunc("/go-panic", func(http.ResponseWriter, *http.Request) {
 		go panic("test hook")

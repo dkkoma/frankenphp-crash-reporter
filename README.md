@@ -172,6 +172,13 @@ its lazy initialization does not happen inside a handler.
   process keeps running. A later fault is reported again.
 - If another library installs a handler for the same signals after the Go
   runtime has started, it replaces both the Go handler and this one.
+- If the program subscribes to SIGSEGV, SIGBUS or SIGFPE with
+  `os/signal.Notify`, or ignores them with `os/signal.Ignore`, the process ends
+  differently once the reporter is enabled. A fault in C code called from a
+  goroutine ends with the default action of the signal, without Go's
+  traceback. A fault on a thread not created by Go also ends with the default
+  action; without the reporter that thread faults in a loop and the process
+  keeps running.
 - When Go code crashes in a way the runtime does not recover from, only the
   runtime's own output is printed, except for SIGILL and SIGABRT.
 

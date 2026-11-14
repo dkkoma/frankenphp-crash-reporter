@@ -144,6 +144,25 @@ if start "disabled: SIGSEGV on a PHP thread while SIGSEGV was ignored before the
 fi
 unset LD_PRELOAD PREVIOUS_HANDLER
 
+if start "disabled: SIGSEGV in C code called from a Go thread while os/signal subscribes to SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/notify-segv"
+    crash "$hooks/segv-in-cgo"
+    expect_status 2
+    expect_count "signal arrived during cgo execution" 1
+    finish
+fi
+
+if start "disabled: SIGSEGV on a PHP thread while os/signal subscribes to SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/notify-segv"
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "$case_name: the process ended"
+    fi
+    kill -KILL "$pid"
+    wait "$pid"
+    finish
+fi
+
 export FRANKENPHP_CRASH_REPORTER=true
 
 if start "Go panics from nil dereferences are still recoverable"; then
@@ -262,6 +281,23 @@ if start "SIGSEGV in C code called from a Go thread"; then
     expect_status 2
     expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
     expect_count "signal arrived during cgo execution" 1
+    finish
+fi
+
+if start "SIGSEGV in C code called from a Go thread while os/signal subscribes to SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/notify-segv"
+    crash "$hooks/segv-in-cgo"
+    expect_status 139
+    expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
+    expect_count "signal arrived during cgo execution" 0
+    finish
+fi
+
+if start "SIGSEGV on a PHP thread while os/signal subscribes to SIGSEGV"; then
+    curl -s -o /dev/null "$hooks/notify-segv"
+    crash "$url?crash=segv"
+    expect_status 139
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
     finish
 fi
 
