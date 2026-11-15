@@ -7,8 +7,8 @@ extern int goNilDeref(void);
 
 __attribute__((noinline)) void test_hooks_segv(void)
 {
-    volatile int *p = 0;
-    *p = 1;
+    static int *volatile null;
+    *null = 1;
 }
 
 static void *ill_thread(void *arg)
