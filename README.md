@@ -89,7 +89,7 @@ time, only the first one is reported.
 | `fault_addr` | For SIGSEGV and SIGBUS, the address the instruction tried to access. For SIGILL and SIGFPE, the address of the instruction. `null` when `code` is zero or negative. On amd64 an access to a non-canonical address (`0x4141414141414141`, for example) gives `code` 128 and `0x0` here, which is not a NULL dereference |
 | `process` | Name of the process |
 | `tid` / `thread` | ID and name of the crashed thread. FrankenPHP names its PHP threads `php-N` |
-| `pc` | Where the crashed instruction is, as `module path+offset from the module start` |
+| `pc` | Where the crashed instruction is, as `module path+address`. The address is the one `addr2line` takes: the offset from the start of the module for a shared library or a position-independent executable, the virtual address for any other executable |
 | `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. In the other cases (code without unwind information such as JIT-compiled code, or a stack that cannot be walked) it is only a hint and may not be a return address at all |
 | `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc`. Empty when they cannot be walked from `pc` |
 | `callers_omitted` | Present only when callers were dropped from the far end to keep the line within 4096 bytes |
@@ -190,12 +190,14 @@ lazy initialization of the unwinder does not happen inside a handler.
 When FrankenPHP is PID 1 of a container (there is no init process in front of
 it), the kernel discards a signal the process sends to itself while the action
 of that signal is the default one. The Go runtime ends the process that way,
-so the outcome of a crash on a PHP thread differs:
+so the outcome of a crash outside Go code differs from the rest of this
+document:
 
-| | Outcome |
-|---|---|
-| Without the reporter | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving |
-| With the reporter | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
+| Crash | Without the reporter | With the reporter |
+|---|---|---|
+| SIGSEGV, SIGBUS, SIGFPE | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
+| `abort()` | The process ends, but not by SIGABRT: glibc falls back to an instruction that raises another fatal signal | The line is printed, and the process ends the same way |
+| SIGILL | The process does not end, as above | The line is printed once, and the process does not end |
 
 With an init process (`docker run --init`, for example) FrankenPHP is not
 PID 1 and the process ends the same way with and without the reporter.
