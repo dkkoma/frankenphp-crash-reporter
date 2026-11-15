@@ -22,9 +22,9 @@ before the process dies:
 The reporter only adds this line. The process ends the way it does without
 the reporter: by the same signal, with the same exit status.
 
-A few setups behave differently. They are collected under
-[Special cases](#special-cases); the one most deployments should know about is
-FrankenPHP running as PID 1 of a container.
+A few setups behave differently, such as FrankenPHP running as PID 1 of a
+container without an init process. They are collected under
+[Special cases](#special-cases).
 
 ## Requirements
 
@@ -215,9 +215,8 @@ does not happen inside a handler.
 
 ## Special cases
 
-Most deployments can skip this section, except for the first item. It lists
-the setups in which the reporter behaves differently from the description
-above.
+Most deployments can skip this section. It lists the setups in which the
+reporter behaves differently from the description above.
 
 ### FrankenPHP as PID 1
 
