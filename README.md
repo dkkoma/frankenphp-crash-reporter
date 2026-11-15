@@ -82,8 +82,8 @@ If its startup checks fail, it stays off and says why:
 
 The reporter prints nothing while the process runs normally. On a fatal signal
 outside Go code it writes one line. When several threads crash at the same
-time, each writes its own line, one after another, until the process ends;
-a thread that has not written its line by then is not reported.
+time, they write their lines one after another. The first thread usually ends
+the process before the others get to write, so expect one line.
 
 | Field | Meaning |
 |---|---|
@@ -177,7 +177,9 @@ handler the Go runtime would have called without the reporter.
 needed. A handler placed in front of the Go one writes the line and calls the
 Go handler.
 
-The handlers do not allocate, take locks, or call `dladdr`. Modules are
+The handlers do not allocate or call `dladdr`. The only lock they take is
+their own, which serializes the reports, and a thread waits for it for about
+a second at most. Modules are
 resolved from `/proc/self/maps`. The stack is walked once at install time so that the
 lazy initialization of the unwinder does not happen inside a handler.
 
@@ -201,7 +203,9 @@ document:
 | Crash | Without the reporter | With the reporter |
 |---|---|---|
 | SIGSEGV, SIGBUS, SIGFPE | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
-| `abort()` | The process ends, but not by SIGABRT: glibc falls back to an instruction that raises another fatal signal | The line is printed, and the process ends the same way |
+| `abort()` with glibc 2.41 or later | The process ends, but not by SIGABRT: glibc falls back to an instruction that raises another fatal signal | The line is printed, and the process ends the same way |
+| `abort()` with an older glibc, on arm64 | The process does not end | The line is printed, and the process does not end |
+| `abort()` with an older glibc, on amd64 | The process does not end | The line is printed, followed by a line for the SIGSEGV glibc falls back to (`"code":128`). The process then exits as in the first row |
 | SIGILL | The process does not end, as above | The line is printed once, and the process does not end |
 
 With an init process (`docker run --init`, for example) FrankenPHP is not
@@ -251,8 +255,9 @@ This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.
 
 The workflow also builds the reporter with `-O0`
-(`--build-arg CGO_OPTIMIZATION=-O0`) and FrankenPHP as a position-independent
-executable (`--build-arg GO_BUILDMODE=pie`).
+(`--build-arg CGO_OPTIMIZATION=-O0`), builds FrankenPHP as a
+position-independent executable (`--build-arg GO_BUILDMODE=pie`), and runs on
+Debian bookworm for its older glibc (`--build-arg DEBIAN_RELEASE=bookworm`).
 
 The `testhooks` directory is a separate Go module that exposes HTTP endpoints
 to crash the process from Go and from C code inside the FrankenPHP binary. It is
