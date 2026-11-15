@@ -16,7 +16,7 @@ With this module linked in and enabled, the same crash leaves a line like this
 before the process dies:
 
 ```json
-{"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","process":"frankenphp","tid":64,"thread":"php-14","pc":"/usr/local/lib/libphp.so+0x6c75a8","callers":["/usr/local/lib/libphp.so+0xa2a7db","/usr/local/bin/frankenphp+0x19d5d82","/usr/lib/x86_64-linux-gnu/libc.so.6+0x928bb"],"build_ids":{"/usr/local/lib/libphp.so":"89ae9f66750b0eb02f6d054072e8ece9474d669e","/usr/local/bin/frankenphp":"...","/usr/lib/x86_64-linux-gnu/libc.so.6":"..."}}
+{"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","process":"frankenphp","tid":64,"thread":"php-14","pc":"/usr/local/lib/libphp.so+0x6c75a8","callers":["/usr/local/lib/libphp.so+0xa2a7db","/usr/local/bin/frankenphp+0x19d5d82","/usr/lib/x86_64-linux-gnu/libc.so.6+0x928bb"]}
 ```
 
 The way the process ends (signal, exit status, Go's own crash output) is
@@ -95,7 +95,6 @@ time, only the first one is reported.
 | `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. In the other cases (code without unwind information such as JIT-compiled code, or a stack that cannot be walked) it is only a hint and may not be a return address at all |
 | `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc`. Empty when they cannot be walked from `pc` |
 | `callers_omitted` | Present only when callers were dropped from the far end to keep the line within 4096 bytes |
-| `build_ids` | GNU build ID of every module that appears in `pc`, `return_address` and `callers` |
 
 The line is at most 4096 bytes (`PIPE_BUF`) and is written with a single
 `write(2)`, so it does not interleave with log lines from other threads when
@@ -112,17 +111,14 @@ could be read before the corrupted part.
 
 A byte outside ASCII in a module path or a process name is written as
 `\u00XX`. A path or name longer than 256 bytes in that form is cut at the
-front and starts with `...`. A build ID is `null` when the module has none, when it is
-longer than 64 bytes, or when the ELF header of the module cannot be read.
+front and starts with `...`.
 
 ## Finding the crash site
 
-1. Get a copy of the module named in `pc` that has debug information, and check
-   that its build ID matches the one in `build_ids`:
-
-   ```sh
-   readelf -n libphp.so | grep 'Build ID'
-   ```
+1. Get the module named in `pc` from the exact build the crashed process ran,
+   with debug information. The offsets mean nothing for any other build, and
+   the report does not say which build it was: take it from the deployment
+   (for a container, the image digest rather than a tag).
 
 2. Pass the offsets to `addr2line`. `callers` and `return_address` are return
    addresses, so subtract 1 to get the line of the call. Pass `pc` as it is.
@@ -182,8 +178,7 @@ needed. A handler placed in front of the Go one writes the line and calls the
 Go handler.
 
 The handlers do not allocate, take locks, or call `dladdr`. Modules are
-resolved from `/proc/self/maps`, and build IDs are read from the ELF headers
-already mapped in memory. The stack is walked once at install time so that the
+resolved from `/proc/self/maps`. The stack is walked once at install time so that the
 lazy initialization of the unwinder does not happen inside a handler.
 
 | Crash | Report | How the process ends |

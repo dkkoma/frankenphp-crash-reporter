@@ -7,7 +7,7 @@ hooks=http://127.0.0.1:8081
 failures=0
 
 export CRASH_REPORTER_TEST_HOOKS=127.0.0.1:8081
-printf '%s\n' /usr/local/lib/trigger.so /usr/local/lib/oversized-note.so > /etc/ld.so.preload
+printf '%s\n' /usr/local/lib/trigger.so > /etc/ld.so.preload
 
 fail() {
     echo "NG: $1"
@@ -256,7 +256,7 @@ if start "SIGSEGV on a PHP thread"; then
     crash "$url?crash=segv"
     expect_status 139
     expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+' \
-        '"/usr/local/lib/trigger.so":"' '"/usr/local/lib/libphp.so":"' '"/usr/local/bin/frankenphp":"'
+        '"/usr/local/lib/libphp.so+' '"/usr/local/bin/frankenphp+'
     finish
 fi
 
@@ -334,7 +334,7 @@ fi
 if start "SIGSEGV in a module whose ELF header is not readable"; then
     crash "$url?crash=unreadable_elf_header"
     expect_status 139
-    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/unreadable-header.so+' '"/usr/local/lib/unreadable-header.so":null'
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/unreadable-header.so+'
     finish
 fi
 
@@ -344,7 +344,7 @@ for _ in $(seq 1 12); do
 done
 mkdir -p "$long_dir"
 cp /usr/local/lib/trigger.so "$long_dir/trigger.so"
-printf '%s\n' "$long_dir/trigger.so" /usr/local/lib/oversized-note.so > /etc/ld.so.preload
+printf '%s\n' "$long_dir/trigger.so" > /etc/ld.so.preload
 if start "SIGSEGV deep in a module with a very long path"; then
     crash "$url?crash=segv_in_deep_call"
     expect_status 139
@@ -354,14 +354,7 @@ if start "SIGSEGV deep in a module with a very long path"; then
     fi
     finish
 fi
-printf '%s\n' /usr/local/lib/trigger.so /usr/local/lib/oversized-note.so > /etc/ld.so.preload
-
-if start "SIGSEGV in a module whose build ID is longer than supported"; then
-    crash "$url?crash_in_oversized_note=segv"
-    expect_status 139
-    expect_report '"signal":11,' '"pc":"/usr/local/lib/oversized-note.so+' '"/usr/local/lib/oversized-note.so":null'
-    finish
-fi
+printf '%s\n' /usr/local/lib/trigger.so > /etc/ld.so.preload
 
 export LD_PRELOAD=/usr/local/lib/previous-handler.so
 if start "SIGSEGV on a PHP thread with a handler installed before the program started"; then

@@ -26,10 +26,8 @@
 
 #define TLS __thread __attribute__((tls_model("initial-exec")))
 #define MAX_FRAMES 64
-#define MAX_MODULES (MAX_FRAMES + 2)
 #define MAX_NAME 256
 #define MAX_LINE PIPE_BUF
-#define MAX_BUILD_ID 64
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -287,8 +285,6 @@ struct module {
     uintptr_t base;
     uintptr_t base_end;
     uintptr_t load_bias;
-    unsigned char build_id[MAX_BUILD_ID];
-    size_t build_id_len;
 };
 
 static int find_module(uintptr_t addr, struct module *mod)
@@ -342,69 +338,6 @@ static uintptr_t load_bias(const struct module *mod)
     return eh && eh->e_type == ET_EXEC ? 0 : mod->base;
 }
 
-static uint64_t note_align(uint64_t size)
-{
-    return (size + 3) & ~(uint64_t)3;
-}
-
-static const unsigned char *find_build_id(const struct module *mod, size_t *len)
-{
-    const ElfW(Ehdr) *eh = elf_header(mod);
-    if (!eh || eh->e_phoff > mod->base_end - mod->base) {
-        return NULL;
-    }
-    uintptr_t ph_addr = mod->base + eh->e_phoff;
-    if (!in_header_mapping(mod, ph_addr, (uint64_t)eh->e_phnum * sizeof(ElfW(Phdr)))) {
-        return NULL;
-    }
-    const ElfW(Phdr) *ph = (const ElfW(Phdr) *)ph_addr;
-    uintptr_t bias = load_bias(mod);
-    for (int i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type != PT_NOTE) {
-            continue;
-        }
-        uintptr_t note = bias + ph[i].p_vaddr;
-        if (!in_header_mapping(mod, note, ph[i].p_memsz)) {
-            continue;
-        }
-        uint64_t left = ph[i].p_memsz;
-        while (left >= sizeof(ElfW(Nhdr))) {
-            const ElfW(Nhdr) *nh = (const ElfW(Nhdr) *)note;
-            uint64_t name_size = note_align(nh->n_namesz);
-            uint64_t desc_size = note_align(nh->n_descsz);
-            left -= sizeof *nh;
-            if (name_size > left || desc_size > left - name_size) {
-                break;
-            }
-            const char *name = (const char *)(note + sizeof *nh);
-            if (nh->n_type == NT_GNU_BUILD_ID && nh->n_namesz == 4 && memcmp(name, "GNU", 4) == 0) {
-                if (nh->n_descsz > MAX_BUILD_ID) {
-                    return NULL;
-                }
-                *len = nh->n_descsz;
-                return (const unsigned char *)name + name_size;
-            }
-            note += sizeof *nh + name_size + desc_size;
-            left -= name_size + desc_size;
-        }
-    }
-    return NULL;
-}
-
-static void append_build_id(const struct module *mod)
-{
-    if (mod->build_id_len == 0) {
-        append_str("null");
-        return;
-    }
-    append("\"", 1);
-    for (size_t i = 0; i < mod->build_id_len; i++) {
-        append(&"0123456789abcdef"[mod->build_id[i] >> 4], 1);
-        append(&"0123456789abcdef"[mod->build_id[i] & 0xf], 1);
-    }
-    append("\"", 1);
-}
-
 struct location {
     struct module module;
     uintptr_t value;
@@ -415,21 +348,14 @@ static struct location return_location;
 static struct location caller_locations[MAX_FRAMES];
 static int caller_count;
 
-static void read_elf_header(struct module *mod)
+static void read_load_bias(struct module *mod)
 {
     sigset_t blocked;
     mod->load_bias = mod->base;
-    mod->build_id_len = 0;
     if (sigsetjmp(recover_from_fault, 1) == 0) {
         faults_recoverable = 1;
         unblock_faults(&blocked);
         mod->load_bias = load_bias(mod);
-        size_t len;
-        const unsigned char *id = find_build_id(mod, &len);
-        if (id) {
-            memcpy(mod->build_id, id, len);
-            mod->build_id_len = len;
-        }
         pthread_sigmask(SIG_SETMASK, &blocked, NULL);
     }
     faults_recoverable = 0;
@@ -438,7 +364,7 @@ static void read_elf_header(struct module *mod)
 static void locate(uintptr_t addr, struct location *loc)
 {
     if (find_module(addr, &loc->module)) {
-        read_elf_header(&loc->module);
+        read_load_bias(&loc->module);
         loc->value = addr - loc->module.load_bias;
     } else {
         loc->module.path = NULL;
@@ -446,7 +372,7 @@ static void locate(uintptr_t addr, struct location *loc)
     }
 }
 
-static void append_location(const struct location *loc, struct module *modules, int *module_count)
+static void append_location(const struct location *loc)
 {
     append("\"", 1);
     if (loc->module.path) {
@@ -455,17 +381,6 @@ static void append_location(const struct location *loc, struct module *modules, 
     }
     append_hex(loc->value);
     append("\"", 1);
-    if (!loc->module.path) {
-        return;
-    }
-    for (int i = 0; i < *module_count; i++) {
-        if (modules[i].base == loc->module.base) {
-            return;
-        }
-    }
-    if (*module_count < MAX_MODULES) {
-        modules[(*module_count)++] = loc->module;
-    }
 }
 
 static void write_all(const char *buf, size_t len)
@@ -495,8 +410,6 @@ static void wait_for_report_written(void)
 
 static void format_report(const char *thread_name, int callers_shown)
 {
-    static struct module modules[MAX_MODULES];
-    int module_count = 0;
     out_len = 0;
 
     append_str("{\"severity\":\"CRITICAL\",\"message\":\"fatal signal\",\"signal\":");
@@ -518,11 +431,11 @@ static void format_report(const char *thread_name, int callers_shown)
     append_str(",\"thread\":");
     append_json_str(thread_name, strlen(thread_name));
     append_str(",\"pc\":");
-    append_location(&pc_location, modules, &module_count);
+    append_location(&pc_location);
     if (first_callers_start < 0) {
         append_str(",\"return_address\":");
         if (first_return_address) {
-            append_location(&return_location, modules, &module_count);
+            append_location(&return_location);
         } else {
             append_str("null");
         }
@@ -532,23 +445,14 @@ static void format_report(const char *thread_name, int callers_shown)
         if (i > 0) {
             append(",", 1);
         }
-        append_location(&caller_locations[i], modules, &module_count);
+        append_location(&caller_locations[i]);
     }
     append_str("]");
     if (callers_shown < caller_count) {
         append_str(",\"callers_omitted\":");
         append_dec(caller_count - callers_shown);
     }
-    append_str(",\"build_ids\":{");
-    for (int i = 0; i < module_count; i++) {
-        if (i > 0) {
-            append(",", 1);
-        }
-        append_json_str(modules[i].path, modules[i].path_len);
-        append(":", 1);
-        append_build_id(&modules[i]);
-    }
-    append_str("}}");
+    append_str("}");
     out[out_len++] = '\n';
 }
 
