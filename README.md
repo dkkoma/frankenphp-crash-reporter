@@ -19,9 +19,12 @@ before the process dies:
 {"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","tid":64,"thread":"php-14","pc":"/usr/local/lib/libphp.so+0x6c75a8","callers":["/usr/local/lib/libphp.so+0xa2a7db","/usr/local/bin/frankenphp+0x19d5d82","/usr/lib/x86_64-linux-gnu/libc.so.6+0x928bb"]}
 ```
 
-The way the process ends (signal, exit status, Go's own crash output) is
-unchanged, except when FrankenPHP runs as PID 1 (see
-[FrankenPHP as PID 1](#frankenphp-as-pid-1)).
+The reporter only adds this line. The process ends the way it does without
+the reporter: by the same signal, with the same exit status.
+
+A few setups behave differently. They are collected under
+[Special cases](#special-cases); the one most deployments should know about is
+FrankenPHP running as PID 1 of a container.
 
 ## Requirements
 
@@ -81,37 +84,47 @@ If its startup checks fail, it stays off and says why:
 ## Output
 
 The reporter prints nothing while the process runs normally. On a fatal signal
-outside Go code it writes one line. When several threads crash at the same
-time, they write their lines one after another. The first thread usually ends
-the process before the others get to write, so expect one line.
+outside Go code it writes one line.
 
 | Field | Meaning |
 |---|---|
 | `signal` | Signal number (11 SIGSEGV, 7 SIGBUS, 8 SIGFPE, 4 SIGILL, 6 SIGABRT) |
 | `code` | `si_code`. Positive values come from the kernel (a bad memory access, for example). Zero or negative values mean the signal was sent with `raise` / `kill`; `abort()` gives -6 |
-| `fault_addr` | For SIGSEGV and SIGBUS, the address the instruction tried to access. For SIGILL and SIGFPE, the address of the instruction. `null` when `code` is zero or negative. On amd64 an access to a non-canonical address (`0x4141414141414141`, for example) gives `code` 128 and `0x0` here, which is not a NULL dereference |
+| `fault_addr` | For SIGSEGV and SIGBUS, the address the instruction tried to access. For SIGILL and SIGFPE, the address of the instruction. `null` when `code` is zero or negative |
 | `tid` / `thread` | ID and name of the crashed thread. FrankenPHP names its PHP threads `php-N` |
-| `pc` | Where the crashed instruction is, as `module path+address`. The address is the one `addr2line` takes: the offset from the start of the module for a shared library or a position-independent executable, the virtual address for any other executable |
-| `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. In the other cases (code without unwind information such as JIT-compiled code, or a stack that cannot be walked) it is only a hint and may not be a return address at all |
-| `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc`. Empty when they cannot be walked from `pc` |
+| `pc` | Where the crashed instruction is, as `module path+address`. The address is the one `addr2line` takes |
+| `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc` |
+| `return_address` | Present only when the callers cannot be walked from `pc`; `callers` is then empty. See below |
 | `callers_omitted` | Present only when callers were dropped from the far end to keep the line within 4096 bytes |
 
 The line is at most 4096 bytes (`PIPE_BUF`) and is written with a single
 `write(2)`, so it does not interleave with log lines from other threads when
 stderr is a pipe.
 
-If stderr does not become writable within about a second (a full pipe that
-nobody reads, for example), the line is dropped and the process ends without
-it.
+Details that matter when reading a line:
 
-At most 64 frames of the stack are walked, so `callers` never holds more than
-that, and `callers_omitted` does not count the frames beyond them. When the
-stack of the crashed thread is corrupted, `callers` holds the frames that
-could be read before the corrupted part.
-
-In a module path or a thread name, a `"`, a `\`, a control
-character and a byte outside ASCII are each written as `?`. A path longer
-than 256 bytes is cut at the front and starts with `...`.
+- **`fault_addr` of `0x0` with `code` 128** is not a NULL dereference. On
+  amd64 the kernel reports an access to a non-canonical address
+  (`0x4141414141414141`, for example) this way.
+- **`pc` of the FrankenPHP binary** is a virtual address unless the binary was
+  built as a position-independent executable. For a shared library, and for a
+  position-independent executable, it is the offset from the start of the
+  module. Either way it is what `addr2line` takes.
+- **`return_address`** is the value at the top of the stack on amd64 and the
+  link register on arm64, or `null` if it could not be read. After a call
+  through a NULL or corrupted function pointer, it is the return address of
+  that call. In the other cases (code without unwind information such as
+  JIT-compiled code, or a stack that cannot be walked) it is only a hint and
+  may not be a return address at all.
+- **`callers`** holds at most 64 frames, and `callers_omitted` does not count
+  the frames beyond them. When the stack of the crashed thread is corrupted,
+  it holds the frames that could be read before the corrupted part.
+- **Module paths and thread names**: a `"`, a `\`, a control character and a
+  byte outside ASCII are each written as `?`. A path longer than 256 bytes is
+  cut at the front and starts with `...`.
+- **Several threads crashing at the same time** write their lines one after
+  another. The first thread usually ends the process before the others get to
+  write, so expect one line.
 
 ## Finding the crash site
 
@@ -168,37 +181,50 @@ calls the Go handler:
   `kill`. The runtime now handles it itself and ends the process the way it
   does without the reporter.
 
-If a handler for one of these signals was already installed when the program
-started (by a preloaded library, for example), the reporting handler calls it
-after writing the line instead of going back to the Go handler. That is the
-handler the Go runtime would have called without the reporter.
-
-**SIGILL, SIGABRT.** The Go runtime never recovers from these, so no decision is
-needed. A handler placed in front of the Go one writes the line and calls the
-Go handler.
+**SIGILL, SIGABRT.** The Go runtime does not turn these into panics, so no
+decision is needed. A handler placed in front of the Go one writes the line
+and calls the Go handler.
 
 The handlers do not allocate or call `dladdr`. The only lock they take is
 their own, which serializes the reports, and a thread waits for it for about
-a second at most. Modules are
-resolved from `/proc/self/maps`. The stack is walked once at install time so that the
-lazy initialization of the unwinder does not happen inside a handler.
+a second at most. Modules are resolved from `/proc/self/maps`. The stack is
+walked once at install time so that the lazy initialization of the unwinder
+does not happen inside a handler.
 
 | Crash | Report | How the process ends |
 |---|---|---|
 | C code on a PHP thread or any other thread not created by Go | yes | default action of the signal (exit status 128 + signal) |
 | C code called from a goroutine | yes | Go's fatal error output with the goroutine traceback, exit status 2. The output shows `sigcode=0` instead of the code of the fault |
-| C code called from a goroutine with `GOTRACEBACK=crash` | yes, and again for the SIGABRT Go sends to itself | the same output, then SIGABRT |
-| Go code (recoverable panic) | no | keeps running |
-| Unrecovered Go panic | no | Go's panic output |
-| Unrecovered Go panic with `GOTRACEBACK=crash` | yes, for the SIGABRT Go sends to itself | Go's panic output, then SIGABRT |
+| Go code, recovered panic | no | keeps running |
+| Go code, unrecovered panic | no | Go's panic output |
 
-## FrankenPHP as PID 1
+## What is not reported
+
+- SIGKILL cannot be caught, so an out-of-memory kill leaves no line.
+- A crash in Go code is left to the Go runtime, as in the table above.
+- If stderr does not become writable within about a second (a full pipe that
+  nobody reads, for example), the line is dropped and the process ends without
+  it.
+- A stack overflow on a thread that has no alternate signal stack leaves no
+  line, because the handler has no stack to run on. The Go runtime gives an
+  alternate signal stack to every thread that has called into Go, which
+  includes FrankenPHP's PHP threads. A thread created in C that never calls
+  into Go has none unless it sets one up.
+- If another library installs a handler for the same signals after the Go
+  runtime has started, it replaces both the Go handler and this one.
+
+## Special cases
+
+Most deployments can skip this section, except for the first item. It lists
+the setups in which the reporter behaves differently from the description
+above.
+
+### FrankenPHP as PID 1
 
 When FrankenPHP is PID 1 of a container (there is no init process in front of
 it), the kernel discards a signal the process sends to itself while the action
 of that signal is the default one. The Go runtime ends the process that way,
-so the outcome of a crash outside Go code differs from the rest of this
-document:
+so the outcome of a crash outside Go code differs:
 
 | Crash | Without the reporter | With the reporter |
 |---|---|---|
@@ -211,24 +237,34 @@ document:
 With an init process (`docker run --init`, for example) FrankenPHP is not
 PID 1 and the process ends the same way with and without the reporter.
 
-## Limitations
+### `GOTRACEBACK=crash`
 
-- SIGKILL cannot be caught, so an out-of-memory kill leaves no line.
-- A stack overflow on a thread that has no alternate signal stack leaves no
-  line, because the handler has no stack to run on. The Go runtime gives an
-  alternate signal stack to every thread that has called into Go, which
-  includes FrankenPHP's PHP threads. A thread created in C that never calls
-  into Go has none unless it sets one up.
-- If a handler that was installed before the program started returns instead
-  of ending the process, the line is printed although the process keeps
-  running. A later fault is reported again, unless it is the same signal at
-  the same instruction on the same thread as the last one reported there.
-- After the process survives a signal that was sent with `kill` to a thread
-  not created by Go, the Go runtime puts its own handler back in front of
-  this one for that signal. From then on, a report for SIGSEGV, SIGBUS or
-  SIGFPE has no `callers`, and SIGILL and SIGABRT are not reported.
-- If another library installs a handler for the same signals after the Go
-  runtime has started, it replaces both the Go handler and this one.
+With this setting the Go runtime finishes a crash by sending SIGABRT to
+itself, and that SIGABRT is reported like any other:
+
+- An unrecovered Go panic, which is otherwise not reported, leaves a line for
+  the SIGABRT.
+- A fault in C code called from a goroutine leaves two lines: one for the
+  fault and one for the SIGABRT.
+
+### A signal handler installed before the program started
+
+A preloaded library can install handlers for these signals before the Go
+runtime starts. The Go runtime calls such a handler for a signal raised by
+non-Go code, and so does the reporter, after writing the line.
+
+- If that handler returns instead of ending the process, the line has been
+  printed although the process keeps running. A later fault is reported
+  again, unless it is the same signal at the same instruction on the same
+  thread as the last one reported there.
+- After the process survives a SIGILL or SIGABRT on a thread not created by
+  Go, or any of the five signals sent with `kill` to such a thread, the Go
+  runtime puts its own handler back in front of this one for that signal.
+  From then on SIGSEGV, SIGBUS and SIGFPE are reported without `callers`,
+  and SIGILL and SIGABRT are not reported.
+
+### `os/signal.Notify` and `os/signal.Ignore` on these signals
+
 - If the program subscribes to SIGSEGV, SIGBUS or SIGFPE with
   `os/signal.Notify`, or ignores them with `os/signal.Ignore`, the process ends
   differently once the reporter is enabled. A fault in C code called from a
@@ -236,8 +272,9 @@ PID 1 and the process ends the same way with and without the reporter.
   traceback. With `os/signal.Notify`, a fault on a thread not created by Go
   also ends with the default action; without the reporter that thread faults
   in a loop and the process keeps running.
-- When Go code crashes in a way the runtime does not recover from, only the
-  runtime's own output is printed, except for SIGILL and SIGABRT.
+- If the program subscribes to SIGILL or SIGABRT with `os/signal.Notify`, one
+  sent with `kill` goes to the channel and the process keeps running, but the
+  line is printed.
 
 ## Testing
 
