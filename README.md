@@ -20,7 +20,8 @@ before the process dies:
 ```
 
 The way the process ends (signal, exit status, Go's own crash output) is
-unchanged.
+unchanged, except when FrankenPHP runs as PID 1 (see
+[FrankenPHP as PID 1](#frankenphp-as-pid-1)).
 
 ## Requirements
 
@@ -89,7 +90,7 @@ time, only the first one is reported.
 | `process` | Name of the process |
 | `tid` / `thread` | ID and name of the crashed thread. FrankenPHP names its PHP threads `php-N` |
 | `pc` | Where the crashed instruction is, as `module path+offset from the module start` |
-| `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. When `pc` is in code without unwind information (JIT-compiled code, for example), it is only a hint and may not be a return address at all |
+| `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. In the other cases (code without unwind information such as JIT-compiled code, or a stack that cannot be walked) it is only a hint and may not be a return address at all |
 | `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc`. Empty when they cannot be walked from `pc` |
 | `callers_omitted` | Present only when callers were dropped from the far end to keep the line within 4096 bytes |
 | `build_ids` | GNU build ID of every module that appears in `pc`, `return_address` and `callers` |
@@ -107,8 +108,9 @@ that, and `callers_omitted` does not count the frames beyond them. When the
 stack of the crashed thread is corrupted, `callers` holds the frames that
 could be read before the corrupted part.
 
-A module path or a process name longer than 256 bytes is cut at the front and
-starts with `...`. A build ID is `null` when the module has none, when it is
+A byte outside ASCII in a module path or a process name is written as
+`\u00XX`. A path or name longer than 256 bytes in that form is cut at the
+front and starts with `...`. A build ID is `null` when the module has none, when it is
 longer than 64 bytes, or when the ELF header of the module cannot be read.
 
 ## Finding the crash site
@@ -183,6 +185,21 @@ lazy initialization of the unwinder does not happen inside a handler.
 | Unrecovered Go panic | no | Go's panic output |
 | Unrecovered Go panic with `GOTRACEBACK=crash` | yes, for the SIGABRT Go sends to itself | Go's panic output, then SIGABRT |
 
+## FrankenPHP as PID 1
+
+When FrankenPHP is PID 1 of a container (there is no init process in front of
+it), the kernel discards a signal the process sends to itself while the action
+of that signal is the default one. The Go runtime ends the process that way,
+so the outcome of a crash on a PHP thread differs:
+
+| | Outcome |
+|---|---|
+| Without the reporter | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving |
+| With the reporter | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
+
+With an init process (`docker run --init`, for example) FrankenPHP is not
+PID 1 and the process ends the same way with and without the reporter.
+
 ## Limitations
 
 - SIGKILL cannot be caught, so an out-of-memory kill leaves no line.
@@ -219,8 +236,11 @@ The test builds FrankenPHP with this module, crashes it in several ways, and
 checks the output and the exit status. It needs only Docker:
 
 ```sh
-docker build --pull --progress plain -f test/Dockerfile .
+docker build --pull --progress plain -t crash-reporter-test -f test/Dockerfile .
+sh test/pid1.sh crash-reporter-test
 ```
+
+The second command crashes FrankenPHP running as PID 1 of a container.
 
 This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.

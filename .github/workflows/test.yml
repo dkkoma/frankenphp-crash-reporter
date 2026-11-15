@@ -50,7 +50,10 @@ jobs:
       - name: Crash FrankenPHP and check the reports
         run: |
           set -o pipefail
-          docker build --pull --progress plain -f test/Dockerfile . 2>&1 | tee build.log
+          docker build --pull --progress plain -t crash-reporter-test -f test/Dockerfile . 2>&1 | tee build.log
+
+      - name: Crash FrankenPHP running as PID 1
+        run: sh test/pid1.sh crash-reporter-test
 
       - name: Show the FrankenPHP version under test
         if: always()
