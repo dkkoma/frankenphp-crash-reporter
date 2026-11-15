@@ -2,8 +2,11 @@
 
 ARG FRANKENPHP_IMAGE=dunglas/frankenphp
 ARG FRANKENPHP_VERSION=1
+ARG CGO_OPTIMIZATION=-O2
 
 FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}-builder AS builder
+
+ARG CGO_OPTIMIZATION
 
 COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
 COPY . /src/crash-reporter/
@@ -14,7 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 \
     XCADDY_GO_BUILD_FLAGS="-ldflags='-w -s' -tags=nobadger,nomysql,nopgx" \
-    CGO_CFLAGS="$(php-config --includes)" \
+    CGO_CFLAGS="${CGO_OPTIMIZATION} -fstack-protector-strong $(php-config --includes)" \
     CGO_LDFLAGS="$(php-config --ldflags) $(php-config --libs)" \
     xcaddy build \
         --output /usr/local/bin/frankenphp \

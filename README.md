@@ -26,7 +26,9 @@ unchanged, except when FrankenPHP runs as PID 1 (see
 ## Requirements
 
 - Linux, amd64 or arm64
-- glibc. musl is not tested
+- glibc 2.35 or later, with libgcc from GCC 12 or later. With older versions
+  the stack walk takes a lock of the dynamic loader inside the signal handler.
+  musl is not tested
 - cgo, which a FrankenPHP build already requires
 
 ## Tested FrankenPHP versions
@@ -142,14 +144,21 @@ usually corrupted earlier, and the crash site is not necessarily the cause.
 ## How it works
 
 The reporter never decides by itself whether a signal hit Go code. It relies
-on two behaviors of the Go runtime that are documented for cgo programs
-(see ["Go programs that use cgo or SWIG"](https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG)):
+on two behaviors of the Go runtime:
 
 - If a handler for SIGSEGV, SIGBUS or SIGFPE is already installed when the Go
   runtime starts, the runtime saves it and calls it when one of these signals
   is raised by non-Go code. Signals raised by Go code become panics as usual.
+  The `os/signal` documentation describes this under
+  ["Non-Go programs that call Go code"](https://pkg.go.dev/os/signal#hdr-Non_Go_programs_that_call_Go_code),
+  and it applies in the same way to a handler installed by a C constructor
+  of a cgo program.
 - A SIGSEGV, SIGBUS or SIGFPE sent with `kill` is not treated as a program
-  error, so the runtime handles it itself.
+  error, so the runtime handles it itself. This is not documented; it is how
+  the runtime is implemented (`sigfwdgo` in `runtime/signal_unix.go`).
+
+The tests run against the latest FrankenPHP every day, so a change in either
+behavior shows up there.
 
 **SIGSEGV, SIGBUS, SIGFPE.** A C constructor installs the reporting handler
 before the Go runtime starts. When the package is initialized, a second handler
@@ -246,6 +255,9 @@ The second command crashes FrankenPHP running as PID 1 of a container.
 
 This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.
+
+The workflow builds the reporter both with `-O0` and with `-O2`
+(`--build-arg CGO_OPTIMIZATION=-O0`); the default of the Dockerfile is `-O2`.
 
 The `testhooks` directory is a separate Go module that exposes HTTP endpoints
 to crash the process from Go and from C code inside the FrankenPHP binary. It is
