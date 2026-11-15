@@ -338,6 +338,18 @@ if start "SIGSEGV in a module whose ELF header is not readable"; then
     finish
 fi
 
+odd_dir=$(printf '/tmp/quote"backslash\\non-ascii-\303\251')
+mkdir -p "$odd_dir"
+cp /usr/local/lib/trigger.so "$odd_dir/trigger.so"
+printf '%s\n' "$odd_dir/trigger.so" > /etc/ld.so.preload
+if start "SIGSEGV in a module whose path has characters that JSON cannot carry as they are"; then
+    crash "$url?crash=segv"
+    expect_status 139
+    expect_report '"signal":11,' '"pc":"/tmp/quote?backslash?non-ascii-??/trigger.so+'
+    finish
+fi
+printf '%s\n' /usr/local/lib/trigger.so > /etc/ld.so.preload
+
 long_dir=/tmp
 for _ in $(seq 1 12); do
     long_dir=$long_dir/$(printf 'd%.0s' $(seq 1 250))

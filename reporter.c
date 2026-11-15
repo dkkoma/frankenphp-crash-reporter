@@ -122,46 +122,16 @@ static void append_str(const char *s)
     append(s, strlen(s));
 }
 
-#define JSON_ESCAPED_MAX 6
-
-static size_t json_escape(unsigned char c, char *escaped)
-{
-    if (c == '"' || c == '\\') {
-        escaped[0] = '\\';
-        escaped[1] = (char)c;
-        return 2;
-    }
-    if (c < 0x20) {
-        return 0;
-    }
-    if (c < 0x80) {
-        escaped[0] = (char)c;
-        return 1;
-    }
-    memcpy(escaped, "\\u00", 4);
-    escaped[4] = "0123456789abcdef"[c >> 4];
-    escaped[5] = "0123456789abcdef"[c & 0xf];
-    return 6;
-}
-
 static void append_json_chars(const char *s, size_t n)
 {
-    char escaped[JSON_ESCAPED_MAX];
-    size_t start = n;
-    size_t escaped_len = 0;
-    while (start > 0) {
-        size_t next = json_escape((unsigned char)s[start - 1], escaped);
-        if (escaped_len + next > MAX_NAME) {
-            break;
-        }
-        escaped_len += next;
-        start--;
-    }
+    size_t start = n > MAX_NAME ? n - MAX_NAME : 0;
     if (start > 0) {
         append_str("...");
     }
     for (size_t i = start; i < n; i++) {
-        append(escaped, json_escape((unsigned char)s[i], escaped));
+        unsigned char c = (unsigned char)s[i];
+        char safe = c < 0x20 || c >= 0x7f || c == '"' || c == '\\' ? '?' : (char)c;
+        append(&safe, 1);
     }
 }
 

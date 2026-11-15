@@ -109,9 +109,9 @@ that, and `callers_omitted` does not count the frames beyond them. When the
 stack of the crashed thread is corrupted, `callers` holds the frames that
 could be read before the corrupted part.
 
-A byte outside ASCII in a module path or a process name is written as
-`\u00XX`. A path or name longer than 256 bytes in that form is cut at the
-front and starts with `...`.
+In a module path, a process name or a thread name, a `"`, a `\`, a control
+character and a byte outside ASCII are each written as `?`. A path or name
+longer than 256 bytes is cut at the front and starts with `...`.
 
 ## Finding the crash site
 
