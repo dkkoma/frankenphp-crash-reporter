@@ -28,6 +28,7 @@
 #define MAX_FRAMES 64
 #define MAX_NAME 256
 #define MAX_LINE PIPE_BUF
+#define MAX_CLOSING 32
 
 #define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -378,7 +379,7 @@ static void wait_for_report_written(void)
     }
 }
 
-static void format_report(const char *thread_name, int callers_shown)
+static void format_report(const char *thread_name)
 {
     out_len = 0;
 
@@ -411,11 +412,17 @@ static void format_report(const char *thread_name, int callers_shown)
         }
     }
     append_str(",\"callers\":[");
-    for (int i = 0; i < callers_shown; i++) {
-        if (i > 0) {
+    int callers_shown = 0;
+    for (; callers_shown < caller_count; callers_shown++) {
+        size_t len_without_caller = out_len;
+        if (callers_shown > 0) {
             append(",", 1);
         }
-        append_location(&caller_locations[i]);
+        append_location(&caller_locations[callers_shown]);
+        if (out_len > MAX_LINE - MAX_CLOSING) {
+            out_len = len_without_caller;
+            break;
+        }
     }
     append_str("]");
     if (callers_shown < caller_count) {
@@ -448,11 +455,7 @@ static void report(void)
         locate((uintptr_t)first_frames[i], &caller_locations[caller_count++]);
     }
 
-    int callers_shown = caller_count;
-    format_report(thread_name, callers_shown);
-    while (out_len > MAX_LINE && callers_shown > 0) {
-        format_report(thread_name, --callers_shown);
-    }
+    format_report(thread_name);
 
     write_all(out, out_len);
     atomic_store(&report_written, 1);
