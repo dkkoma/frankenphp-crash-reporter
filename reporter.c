@@ -395,8 +395,6 @@ static void format_report(const char *thread_name)
     } else {
         append_str("null");
     }
-    append_str(",\"process\":");
-    append_json_str(program_invocation_short_name, strlen(program_invocation_short_name));
     append_str(",\"tid\":");
     append_dec(atomic_load(&reporter_tid));
     append_str(",\"thread\":");

@@ -16,7 +16,7 @@ With this module linked in and enabled, the same crash leaves a line like this
 before the process dies:
 
 ```json
-{"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","process":"frankenphp","tid":64,"thread":"php-14","pc":"/usr/local/lib/libphp.so+0x6c75a8","callers":["/usr/local/lib/libphp.so+0xa2a7db","/usr/local/bin/frankenphp+0x19d5d82","/usr/lib/x86_64-linux-gnu/libc.so.6+0x928bb"]}
+{"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","tid":64,"thread":"php-14","pc":"/usr/local/lib/libphp.so+0x6c75a8","callers":["/usr/local/lib/libphp.so+0xa2a7db","/usr/local/bin/frankenphp+0x19d5d82","/usr/lib/x86_64-linux-gnu/libc.so.6+0x928bb"]}
 ```
 
 The way the process ends (signal, exit status, Go's own crash output) is
@@ -69,13 +69,13 @@ value, leaves the reporter off and the process untouched.
 At startup the reporter prints one line that tells whether it is active:
 
 ```json
-{"severity":"INFO","message":"crash reporter armed","process":"frankenphp"}
+{"severity":"INFO","message":"crash reporter armed"}
 ```
 
 If its startup checks fail, it stays off and says why:
 
 ```json
-{"severity":"WARNING","message":"crash reporter not armed: ...","process":"frankenphp"}
+{"severity":"WARNING","message":"crash reporter not armed: ..."}
 ```
 
 ## Output
@@ -89,7 +89,6 @@ time, only the first one is reported.
 | `signal` | Signal number (11 SIGSEGV, 7 SIGBUS, 8 SIGFPE, 4 SIGILL, 6 SIGABRT) |
 | `code` | `si_code`. Positive values come from the kernel (a bad memory access, for example). Zero or negative values mean the signal was sent with `raise` / `kill`; `abort()` gives -6 |
 | `fault_addr` | For SIGSEGV and SIGBUS, the address the instruction tried to access. For SIGILL and SIGFPE, the address of the instruction. `null` when `code` is zero or negative. On amd64 an access to a non-canonical address (`0x4141414141414141`, for example) gives `code` 128 and `0x0` here, which is not a NULL dereference |
-| `process` | Name of the process |
 | `tid` / `thread` | ID and name of the crashed thread. FrankenPHP names its PHP threads `php-N` |
 | `pc` | Where the crashed instruction is, as `module path+address`. The address is the one `addr2line` takes: the offset from the start of the module for a shared library or a position-independent executable, the virtual address for any other executable |
 | `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. In the other cases (code without unwind information such as JIT-compiled code, or a stack that cannot be walked) it is only a hint and may not be a return address at all |
@@ -109,9 +108,9 @@ that, and `callers_omitted` does not count the frames beyond them. When the
 stack of the crashed thread is corrupted, `callers` holds the frames that
 could be read before the corrupted part.
 
-In a module path, a process name or a thread name, a `"`, a `\`, a control
-character and a byte outside ASCII are each written as `?`. A path or name
-longer than 256 bytes is cut at the front and starts with `...`.
+In a module path or a thread name, a `"`, a `\`, a control
+character and a byte outside ASCII are each written as `?`. A path longer
+than 256 bytes is cut at the front and starts with `...`.
 
 ## Finding the crash site
 

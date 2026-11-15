@@ -10,7 +10,6 @@ import "C"
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 )
 
 func init() {
@@ -31,7 +30,6 @@ func logLine(severity, message string) {
 	line, _ := json.Marshal(struct {
 		Severity string `json:"severity"`
 		Message  string `json:"message"`
-		Process  string `json:"process"`
-	}{severity, message, filepath.Base(os.Args[0])})
+	}{severity, message})
 	os.Stderr.Write(append(line, '\n'))
 }

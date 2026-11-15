@@ -82,7 +82,7 @@ expect_report() {
     if ! php -r 'json_decode($argv[1], flags: JSON_THROW_ON_ERROR);' "$line"; then
         fail "$case_name: the fatal signal line is not valid JSON"
     fi
-    for want in '"process":"frankenphp"' "$@"; do
+    for want in "$@"; do
         case $line in
             *"$want"*) ;;
             *) fail "$case_name: the fatal signal line lacks $want" ;;
