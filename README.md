@@ -102,8 +102,14 @@ If stderr does not become writable within about a second (a full pipe that
 nobody reads, for example), the line is dropped and the process ends without
 it.
 
-When the stack of the crashed thread is corrupted, `callers` holds the frames
-that could be read before the corrupted part.
+At most 64 frames of the stack are walked, so `callers` never holds more than
+that, and `callers_omitted` does not count the frames beyond them. When the
+stack of the crashed thread is corrupted, `callers` holds the frames that
+could be read before the corrupted part.
+
+A module path or a process name longer than 256 bytes is cut at the front and
+starts with `...`. A build ID is `null` when the module has none, when it is
+longer than 64 bytes, or when the ELF header of the module cannot be read.
 
 ## Finding the crash site
 

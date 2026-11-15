@@ -190,6 +190,12 @@ if start "disabled: SIGSEGV sent to a C thread"; then
     finish
 fi
 
+if start "disabled: SIGBUS on a PHP thread"; then
+    crash "$url?crash=bus"
+    expect_status 135
+    finish
+fi
+
 if start "disabled: stack buffer overflow detected on a PHP thread"; then
     crash "$url?crash=stack_buffer_overflow"
     expect_status 134
@@ -270,7 +276,48 @@ kill "$stuck_reader"
 rm -f "$stderr_fifo"
 unset stderr_fifo
 
-if start "SIGSEGV in a module whose build ID note claims an oversized ID"; then
+if start "SIGBUS on a PHP thread"; then
+    crash "$url?crash=bus"
+    expect_status 135
+    expect_report '"signal":7,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+    finish
+fi
+
+if [ "$(uname -m)" = x86_64 ]; then
+    if start "SIGFPE on a PHP thread"; then
+        crash "$url?crash=divide_by_zero"
+        expect_status 136
+        expect_report '"signal":8,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+        finish
+    fi
+fi
+
+if start "SIGSEGV in a module whose ELF header is not readable"; then
+    crash "$url?crash=unreadable_elf_header"
+    expect_status 139
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/unreadable-header.so+' '"/usr/local/lib/unreadable-header.so":null'
+    finish
+fi
+
+long_dir=/tmp
+for _ in $(seq 1 12); do
+    long_dir=$long_dir/$(printf 'd%.0s' $(seq 1 250))
+done
+mkdir -p "$long_dir"
+cp /usr/local/lib/trigger.so "$long_dir/trigger.so"
+printf '%s\n' "$long_dir/trigger.so" /usr/local/lib/oversized-note.so > /etc/ld.so.preload
+if start "SIGSEGV deep in a module with a very long path"; then
+    crash "$url?crash=segv_in_deep_call"
+    expect_status 139
+    expect_report '"signal":11,' '"code":1,' '"fault_addr":"0x0"' '"thread":"php-' '/trigger.so+' '"callers_omitted":'
+    if [ "${#line}" -ge 4096 ]; then
+        fail "$case_name: the fatal signal line is ${#line} bytes, want less than 4096"
+    fi
+    finish
+fi
+printf '%s\n' /usr/local/lib/trigger.so /usr/local/lib/oversized-note.so > /etc/ld.so.preload
+
+if start "SIGSEGV in a module whose build ID is longer than supported"; then
     crash "$url?crash_in_oversized_note=segv"
     expect_status 139
     expect_report '"signal":11,' '"pc":"/usr/local/lib/oversized-note.so+' '"/usr/local/lib/oversized-note.so":null'

@@ -26,7 +26,8 @@
 
 #define TLS __thread __attribute__((tls_model("initial-exec")))
 #define MAX_FRAMES 64
-#define MAX_MODULES 16
+#define MAX_MODULES (MAX_FRAMES + 2)
+#define MAX_NAME 256
 #define MAX_LINE PIPE_BUF
 #define MAX_BUILD_ID 64
 
@@ -54,8 +55,17 @@ static TLS int first_frame_count;
 static TLS int first_callers_start;
 static TLS int captured;
 static TLS int handed_back_to_go;
-static TLS volatile sig_atomic_t unwinding;
-static TLS sigjmp_buf unwind_faulted;
+static TLS volatile sig_atomic_t faults_recoverable;
+static TLS sigjmp_buf recover_from_fault;
+
+static void unblock_faults(sigset_t *blocked)
+{
+    sigset_t faults;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &faults, blocked);
+}
 
 static char maps[1 << 20];
 static size_t maps_len;
@@ -136,8 +146,21 @@ static size_t json_escape(unsigned char c, char *escaped)
 
 static void append_json_chars(const char *s, size_t n)
 {
-    for (size_t i = 0; i < n; i++) {
-        char escaped[JSON_ESCAPED_MAX];
+    char escaped[JSON_ESCAPED_MAX];
+    size_t start = n;
+    size_t escaped_len = 0;
+    while (start > 0) {
+        size_t next = json_escape((unsigned char)s[start - 1], escaped);
+        if (escaped_len + next > MAX_NAME) {
+            break;
+        }
+        escaped_len += next;
+        start--;
+    }
+    if (start > 0) {
+        append_str("...");
+    }
+    for (size_t i = start; i < n; i++) {
         append(escaped, json_escape((unsigned char)s[i], escaped));
     }
 }
@@ -261,6 +284,9 @@ struct module {
     size_t path_len;
     uintptr_t base;
     uintptr_t base_end;
+    uintptr_t load_bias;
+    unsigned char build_id[MAX_BUILD_ID];
+    size_t build_id_len;
 };
 
 static int find_module(uintptr_t addr, struct module *mod)
@@ -365,16 +391,14 @@ static const unsigned char *find_build_id(const struct module *mod, size_t *len)
 
 static void append_build_id(const struct module *mod)
 {
-    size_t len;
-    const unsigned char *id = find_build_id(mod, &len);
-    if (!id) {
+    if (mod->build_id_len == 0) {
         append_str("null");
         return;
     }
     append("\"", 1);
-    for (size_t i = 0; i < len; i++) {
-        append(&"0123456789abcdef"[id[i] >> 4], 1);
-        append(&"0123456789abcdef"[id[i] & 0xf], 1);
+    for (size_t i = 0; i < mod->build_id_len; i++) {
+        append(&"0123456789abcdef"[mod->build_id[i] >> 4], 1);
+        append(&"0123456789abcdef"[mod->build_id[i] & 0xf], 1);
     }
     append("\"", 1);
 }
@@ -389,10 +413,31 @@ static struct location return_location;
 static struct location caller_locations[MAX_FRAMES];
 static int caller_count;
 
+static void read_elf_header(struct module *mod)
+{
+    sigset_t blocked;
+    mod->load_bias = mod->base;
+    mod->build_id_len = 0;
+    if (sigsetjmp(recover_from_fault, 1) == 0) {
+        faults_recoverable = 1;
+        unblock_faults(&blocked);
+        mod->load_bias = load_bias(mod);
+        size_t len;
+        const unsigned char *id = find_build_id(mod, &len);
+        if (id) {
+            memcpy(mod->build_id, id, len);
+            mod->build_id_len = len;
+        }
+        pthread_sigmask(SIG_SETMASK, &blocked, NULL);
+    }
+    faults_recoverable = 0;
+}
+
 static void locate(uintptr_t addr, struct location *loc)
 {
     if (find_module(addr, &loc->module)) {
-        loc->value = addr - load_bias(&loc->module);
+        read_elf_header(&loc->module);
+        loc->value = addr - loc->module.load_bias;
     } else {
         loc->module.path = NULL;
         loc->value = addr;
@@ -448,7 +493,7 @@ static void wait_for_report_written(void)
 
 static void format_report(const char *thread_name, int callers_shown)
 {
-    struct module modules[MAX_MODULES];
+    static struct module modules[MAX_MODULES];
     int module_count = 0;
     out_len = 0;
 
@@ -557,18 +602,15 @@ static _Unwind_Reason_Code record_frame(struct _Unwind_Context *context, void *u
 
 static void walk_stack(void)
 {
-    sigset_t faults, blocked;
-    sigemptyset(&faults);
-    sigaddset(&faults, SIGSEGV);
-    sigaddset(&faults, SIGBUS);
+    sigset_t blocked;
     first_frame_count = 0;
-    if (sigsetjmp(unwind_faulted, 1) == 0) {
-        unwinding = 1;
-        pthread_sigmask(SIG_UNBLOCK, &faults, &blocked);
+    if (sigsetjmp(recover_from_fault, 1) == 0) {
+        faults_recoverable = 1;
+        unblock_faults(&blocked);
         _Unwind_Backtrace(record_frame, NULL);
         pthread_sigmask(SIG_SETMASK, &blocked, NULL);
     }
-    unwinding = 0;
+    faults_recoverable = 0;
     if (first_frame_count > 0 && first_frames[first_frame_count - 1] == NULL) {
         first_frame_count--;
     }
@@ -612,8 +654,8 @@ static void die_by_default(int sig)
 
 static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
 {
-    if (unwinding) {
-        siglongjmp(unwind_faulted, 1);
+    if (faults_recoverable) {
+        siglongjmp(recover_from_fault, 1);
     }
     if (handed_back_to_go) {
         die_by_default(sig);
@@ -650,8 +692,8 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
 
 static void capture_then_go(int sig, siginfo_t *info, void *ucontext)
 {
-    if (unwinding) {
-        siglongjmp(unwind_faulted, 1);
+    if (faults_recoverable) {
+        siglongjmp(recover_from_fault, 1);
     }
     if (!handed_back_to_go) {
         capture(sig, info, ucontext);
