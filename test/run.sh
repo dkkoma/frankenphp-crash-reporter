@@ -563,7 +563,13 @@ fi
 if start "SIGSEGV on two C threads at the same time"; then
     crash "$hooks/segv-on-two-c-threads"
     expect_status 139
-    expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
+    reports=$(count '"message":"fatal signal","signal":11,')
+    if [ "$reports" -lt 1 ] || [ "$reports" -gt 2 ]; then
+        fail "$case_name: $reports fatal signal lines, want 1 or 2"
+    fi
+    if [ "$(grep '"message":"fatal signal"' "$log" | grep -c '"pc":"/usr/local/bin/frankenphp+')" -ne "$reports" ]; then
+        fail "$case_name: a fatal signal line is not complete"
+    fi
     finish
 fi
 
@@ -582,6 +588,16 @@ if start "SIGILL in C code of the frankenphp binary on a C thread"; then
 fi
 
 export GOTRACEBACK=crash
+
+if start "SIGSEGV in C code called from a Go thread while Go aborts itself after a fatal error"; then
+    crash "$hooks/segv-in-cgo"
+    expect_status 134
+    expect_count "signal arrived during cgo execution" 1
+    expect_count '"message":"fatal signal"' 2
+    expect_count '"signal":11,' 1
+    expect_count '"signal":6,' 1
+    finish
+fi
 
 if start "Go aborts itself after an unrecovered panic"; then
     crash "$hooks/go-panic"

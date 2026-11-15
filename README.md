@@ -82,7 +82,8 @@ If its startup checks fail, it stays off and says why:
 
 The reporter prints nothing while the process runs normally. On a fatal signal
 outside Go code it writes one line. When several threads crash at the same
-time, only the first one is reported.
+time, each writes its own line, one after another, until the process ends;
+a thread that has not written its line by then is not reported.
 
 | Field | Meaning |
 |---|---|
@@ -184,6 +185,7 @@ lazy initialization of the unwinder does not happen inside a handler.
 |---|---|---|
 | C code on a PHP thread or any other thread not created by Go | yes | default action of the signal (exit status 128 + signal) |
 | C code called from a goroutine | yes | Go's fatal error output with the goroutine traceback, exit status 2. The output shows `sigcode=0` instead of the code of the fault |
+| C code called from a goroutine with `GOTRACEBACK=crash` | yes, and again for the SIGABRT Go sends to itself | the same output, then SIGABRT |
 | Go code (recoverable panic) | no | keeps running |
 | Unrecovered Go panic | no | Go's panic output |
 | Unrecovered Go panic with `GOTRACEBACK=crash` | yes, for the SIGABRT Go sends to itself | Go's panic output, then SIGABRT |
@@ -217,8 +219,6 @@ PID 1 and the process ends the same way with and without the reporter.
   of ending the process, the line is printed although the process keeps
   running. A later fault is reported again, unless it is the same signal at
   the same instruction on the same thread as the last one reported there.
-  With such a handler, threads that crash at the same time may each be
-  reported, and their lines may be mixed up.
 - After the process survives a signal that was sent with `kill` to a thread
   not created by Go, the Go runtime puts its own handler back in front of
   this one for that signal. From then on, a report for SIGSEGV, SIGBUS or

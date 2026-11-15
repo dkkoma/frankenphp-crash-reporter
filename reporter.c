@@ -41,9 +41,7 @@ extern const ElfW(Ehdr) __ehdr_start __attribute__((visibility("hidden")));
 static struct sigaction go_actions[NSIG];
 static struct sigaction previous_actions[NSIG];
 static atomic_int state = NOT_INSTALLED;
-static atomic_int reported;
-static atomic_int report_written;
-static atomic_int reporter_tid;
+static atomic_flag reporting = ATOMIC_FLAG_INIT;
 static int executable_is_position_independent;
 
 static TLS int first_signal;
@@ -319,14 +317,6 @@ static void write_all(const char *buf, size_t len)
     }
 }
 
-static void wait_for_report_written(void)
-{
-    struct timespec interval = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
-    for (int i = 0; i < 100 && !atomic_load(&report_written); i++) {
-        nanosleep(&interval, NULL);
-    }
-}
-
 static void format_report(const char *thread_name)
 {
     out_len = 0;
@@ -344,7 +334,7 @@ static void format_report(const char *thread_name)
         append_str("null");
     }
     append_str(",\"tid\":");
-    append_dec(atomic_load(&reporter_tid));
+    append_dec(syscall(SYS_gettid));
     append_str(",\"thread\":");
     append_json_str(thread_name, strlen(thread_name));
     append_str(",\"pc\":");
@@ -381,14 +371,13 @@ static void format_report(const char *thread_name)
 
 static void report(void)
 {
-    int tid = (int)syscall(SYS_gettid);
-    if (atomic_exchange(&reported, 1)) {
-        if (atomic_load(&reporter_tid) != tid) {
-            wait_for_report_written();
+    struct timespec interval = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
+    for (int waits = 0; atomic_flag_test_and_set(&reporting); waits++) {
+        if (waits == 100) {
+            return;
         }
-        return;
+        nanosleep(&interval, NULL);
     }
-    atomic_store(&reporter_tid, tid);
     load_maps();
 
     char thread_name[17] = {0};
@@ -404,15 +393,7 @@ static void report(void)
     format_report(thread_name);
 
     write_all(out, out_len);
-    atomic_store(&report_written, 1);
-}
-
-static void allow_next_report(void)
-{
-    if (atomic_load(&reporter_tid) == (int)syscall(SYS_gettid)) {
-        atomic_store(&report_written, 0);
-        atomic_store(&reported, 0);
-    }
+    atomic_flag_clear(&reporting);
 }
 
 static _Unwind_Reason_Code record_frame(struct _Unwind_Context *context, void *unused)
@@ -500,11 +481,9 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
     }
     const struct sigaction *previous = &previous_actions[sig];
     if (previous->sa_handler == SIG_IGN) {
-        allow_next_report();
         return;
     }
     if (previous->sa_handler != SIG_DFL) {
-        allow_next_report();
         if (previous->sa_flags & SA_SIGINFO) {
             previous->sa_sigaction(sig, info, ucontext);
         } else {
@@ -540,7 +519,6 @@ static void report_then_go(int sig, siginfo_t *info, void *ucontext)
     capture(sig, info, ucontext);
     report();
     go_actions[sig].sa_sigaction(sig, info, ucontext);
-    allow_next_report();
 }
 
 __attribute__((constructor)) static void install_before_go_runtime(void)
