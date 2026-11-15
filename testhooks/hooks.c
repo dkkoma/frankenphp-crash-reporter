@@ -5,7 +5,7 @@
 
 extern int goNilDeref(void);
 
-void test_hooks_segv(void)
+__attribute__((noinline)) void test_hooks_segv(void)
 {
     volatile int *p = 0;
     *p = 1;

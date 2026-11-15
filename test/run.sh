@@ -497,7 +497,7 @@ if start "SIGSEGV in C code of the frankenphp binary on a C thread"; then
     crash "$hooks/segv-on-c-thread"
     expect_status 139
     expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
-    expect_pc_in_symbol /crash-reporter-test/segv-thread.symbol
+    expect_pc_in_symbol /crash-reporter-test/test-hooks-segv.symbol
     finish
 fi
 

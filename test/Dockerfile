@@ -27,9 +27,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
         --with github.com/dunglas/frankenphp/caddy=./caddy/ \
         --with github.com/dkkoma/frankenphp-crash-reporter=/src/crash-reporter \
         --with github.com/dkkoma/frankenphp-crash-reporter/testhooks=/src/crash-reporter/testhooks \
-    && nm -S /usr/local/bin/frankenphp | grep ' segv_thread$' > /segv-thread.symbol \
+    && nm -S /usr/local/bin/frankenphp | grep ' test_hooks_segv$' > /test-hooks-segv.symbol \
     && readelf -h /usr/local/bin/frankenphp | grep 'Type:' \
-    && cat /segv-thread.symbol \
+    && cat /test-hooks-segv.symbol \
     && gcc -O2 -fPIC -shared -Wall -Wextra -fno-omit-frame-pointer -fstack-protector-all -U_FORTIFY_SOURCE -o /trigger.so /tmp/trigger.c -ldl \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /previous-handler.so /tmp/previous_handler.c
 
@@ -40,7 +40,7 @@ RUN frankenphp version
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
 COPY --from=builder /trigger.so /usr/local/lib/trigger.so
 COPY --from=builder /previous-handler.so /usr/local/lib/previous-handler.so
-COPY --from=builder /segv-thread.symbol /crash-reporter-test/segv-thread.symbol
+COPY --from=builder /test-hooks-segv.symbol /crash-reporter-test/test-hooks-segv.symbol
 COPY test/Caddyfile test/worker.php test/run.sh /crash-reporter-test/
 
 RUN sh /crash-reporter-test/run.sh
