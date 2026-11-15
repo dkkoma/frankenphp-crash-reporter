@@ -90,6 +90,14 @@ expect_report() {
     done
 }
 
+expect_pc_in_symbol() {
+    read -r symbol_start symbol_size _ < "$1"
+    pc=$(printf '%s' "$line" | sed 's/.*"pc":"[^"]*+0x\([0-9a-f]*\)".*/\1/')
+    if [ "$((0x$pc))" -lt "$((0x$symbol_start))" ] || [ "$((0x$pc))" -ge "$((0x$symbol_start + 0x$symbol_size))" ]; then
+        fail "$case_name: pc 0x$pc is outside the symbol at 0x$symbol_start (size 0x$symbol_size)"
+    fi
+}
+
 crash() {
     curl -s -o /dev/null "$1"
     wait_exit
@@ -331,13 +339,6 @@ if [ "$(uname -m)" = x86_64 ]; then
     fi
 fi
 
-if start "SIGSEGV in a module whose ELF header is not readable"; then
-    crash "$url?crash=unreadable_elf_header"
-    expect_status 139
-    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/unreadable-header.so+'
-    finish
-fi
-
 odd_dir=$(printf '/tmp/quote"backslash\\non-ascii-\303\251')
 mkdir -p "$odd_dir"
 cp /usr/local/lib/trigger.so "$odd_dir/trigger.so"
@@ -496,6 +497,7 @@ if start "SIGSEGV in C code of the frankenphp binary on a C thread"; then
     crash "$hooks/segv-on-c-thread"
     expect_status 139
     expect_report '"signal":11,' '"pc":"/usr/local/bin/frankenphp+'
+    expect_pc_in_symbol /crash-reporter-test/segv-thread.symbol
     finish
 fi
 

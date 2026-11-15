@@ -250,8 +250,9 @@ The second command crashes FrankenPHP running as PID 1 of a container.
 This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.
 
-The workflow builds the reporter both with `-O0` and with `-O2`
-(`--build-arg CGO_OPTIMIZATION=-O0`); the default of the Dockerfile is `-O2`.
+The workflow also builds the reporter with `-O0`
+(`--build-arg CGO_OPTIMIZATION=-O0`) and FrankenPHP as a position-independent
+executable (`--build-arg GO_BUILDMODE=pie`).
 
 The `testhooks` directory is a separate Go module that exposes HTTP endpoints
 to crash the process from Go and from C code inside the FrankenPHP binary. It is

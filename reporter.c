@@ -3,7 +3,6 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -37,12 +36,15 @@ static const int always_fatal[] = {SIGILL, SIGABRT};
 
 enum { NOT_INSTALLED, INSTALLED, DISABLED };
 
+extern const ElfW(Ehdr) __ehdr_start __attribute__((visibility("hidden")));
+
 static struct sigaction go_actions[NSIG];
 static struct sigaction previous_actions[NSIG];
 static atomic_int state = NOT_INSTALLED;
 static atomic_int reported;
 static atomic_int report_written;
 static atomic_int reporter_tid;
+static int executable_is_position_independent;
 
 static TLS int first_signal;
 static TLS int first_code;
@@ -59,15 +61,6 @@ static TLS uintptr_t last_reported_pc;
 static TLS volatile sig_atomic_t faults_recoverable;
 static TLS sigjmp_buf recover_from_fault;
 
-static void unblock_faults(sigset_t *blocked)
-{
-    sigset_t faults;
-    sigemptyset(&faults);
-    sigaddset(&faults, SIGSEGV);
-    sigaddset(&faults, SIGBUS);
-    pthread_sigmask(SIG_UNBLOCK, &faults, blocked);
-}
-
 static char maps[1 << 20];
 static size_t maps_len;
 static char out[32768];
@@ -80,9 +73,6 @@ static uintptr_t context_pc(void *ucontext)
     return (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
 #elif defined(__aarch64__)
     return (uintptr_t)uc->uc_mcontext.pc;
-#else
-    (void)uc;
-    return 0;
 #endif
 }
 
@@ -99,9 +89,6 @@ static uintptr_t context_return_address(void *ucontext)
     return value;
 #elif defined(__aarch64__)
     return (uintptr_t)uc->uc_mcontext.regs[30];
-#else
-    (void)uc;
-    return 0;
 #endif
 }
 
@@ -254,8 +241,6 @@ struct module {
     const char *path;
     size_t path_len;
     uintptr_t base;
-    uintptr_t base_end;
-    uintptr_t load_bias;
 };
 
 static int find_module(uintptr_t addr, struct module *mod)
@@ -279,34 +264,10 @@ static int find_module(uintptr_t addr, struct module *mod)
             mod->path = found_path;
             mod->path_len = found_len;
             mod->base = m.start;
-            mod->base_end = m.end;
             has_base = 1;
         }
     }
     return has_base;
-}
-
-static int in_header_mapping(const struct module *mod, uintptr_t addr, uint64_t len)
-{
-    return addr >= mod->base && addr <= mod->base_end && len <= mod->base_end - addr;
-}
-
-static const ElfW(Ehdr) *elf_header(const struct module *mod)
-{
-    if (!in_header_mapping(mod, mod->base, sizeof(ElfW(Ehdr)))) {
-        return NULL;
-    }
-    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)mod->base;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) {
-        return NULL;
-    }
-    return eh;
-}
-
-static uintptr_t load_bias(const struct module *mod)
-{
-    const ElfW(Ehdr) *eh = elf_header(mod);
-    return eh && eh->e_type == ET_EXEC ? 0 : mod->base;
 }
 
 struct location {
@@ -319,24 +280,11 @@ static struct location return_location;
 static struct location caller_locations[MAX_FRAMES];
 static int caller_count;
 
-static void read_load_bias(struct module *mod)
-{
-    sigset_t blocked;
-    mod->load_bias = mod->base;
-    if (sigsetjmp(recover_from_fault, 1) == 0) {
-        faults_recoverable = 1;
-        unblock_faults(&blocked);
-        mod->load_bias = load_bias(mod);
-        pthread_sigmask(SIG_SETMASK, &blocked, NULL);
-    }
-    faults_recoverable = 0;
-}
-
 static void locate(uintptr_t addr, struct location *loc)
 {
     if (find_module(addr, &loc->module)) {
-        read_load_bias(&loc->module);
-        loc->value = addr - loc->module.load_bias;
+        int at_link_address = !executable_is_position_independent && loc->module.base == (uintptr_t)&__ehdr_start;
+        loc->value = at_link_address ? addr : addr - loc->module.base;
     } else {
         loc->module.path = NULL;
         loc->value = addr;
@@ -479,11 +427,14 @@ static _Unwind_Reason_Code record_frame(struct _Unwind_Context *context, void *u
 
 static void walk_stack(void)
 {
-    sigset_t blocked;
+    sigset_t faults, blocked;
+    sigemptyset(&faults);
+    sigaddset(&faults, SIGSEGV);
+    sigaddset(&faults, SIGBUS);
     first_frame_count = 0;
     if (sigsetjmp(recover_from_fault, 1) == 0) {
         faults_recoverable = 1;
-        unblock_faults(&blocked);
+        pthread_sigmask(SIG_UNBLOCK, &faults, &blocked);
         _Unwind_Backtrace(record_frame, NULL);
         pthread_sigmask(SIG_SETMASK, &blocked, NULL);
     }
@@ -598,6 +549,7 @@ __attribute__((constructor)) static void install_before_go_runtime(void)
     if (!enabled || strcmp(enabled, "true") != 0) {
         return;
     }
+    executable_is_position_independent = __ehdr_start.e_type != ET_EXEC;
     walk_stack();
     for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
         struct sigaction ours;

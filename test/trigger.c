@@ -109,13 +109,6 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, s
         quotient = one / zero;
         (void)quotient;
     }
-    if (strcmp(name, "unreadable_elf_header") == 0) {
-        void *module = dlopen("/usr/local/lib/unreadable-header.so", RTLD_NOW | RTLD_LOCAL);
-        void (*fault)(void) = module ? dlsym(module, "make_own_elf_header_unreadable_then_fault") : NULL;
-        if (fault) {
-            fault();
-        }
-    }
     if (strcmp(name, "non_canonical_address") == 0) {
         static volatile uintptr_t address = 0x4141414141414141;
         *(volatile char *)address = 1;
