@@ -102,9 +102,10 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, s
         write_past_end_of_file();
     }
     if (strcmp(name, "divide_by_zero") == 0) {
+        static volatile int one = 1;
         static volatile int zero;
         static volatile int quotient;
-        quotient = 1 / zero;
+        quotient = one / zero;
         (void)quotient;
     }
     if (strcmp(name, "unreadable_elf_header") == 0) {

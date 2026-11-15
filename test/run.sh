@@ -196,6 +196,14 @@ if start "disabled: SIGBUS on a PHP thread"; then
     finish
 fi
 
+if [ "$(uname -m)" = x86_64 ]; then
+    if start "disabled: SIGFPE on a PHP thread"; then
+        crash "$url?crash=divide_by_zero"
+        expect_status 136
+        finish
+    fi
+fi
+
 if start "disabled: stack buffer overflow detected on a PHP thread"; then
     crash "$url?crash=stack_buffer_overflow"
     expect_status 134
