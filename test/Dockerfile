@@ -2,10 +2,11 @@
 
 ARG FRANKENPHP_IMAGE=dunglas/frankenphp
 ARG FRANKENPHP_VERSION=1
+ARG DEBIAN_RELEASE=
 ARG CGO_OPTIMIZATION=-O2
 ARG GO_BUILDMODE=exe
 
-FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}-builder AS builder
+FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}-builder${DEBIAN_RELEASE:+-}${DEBIAN_RELEASE} AS builder
 
 ARG CGO_OPTIMIZATION
 ARG GO_BUILDMODE
@@ -33,7 +34,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && gcc -O2 -fPIC -shared -Wall -Wextra -fno-omit-frame-pointer -fstack-protector-all -U_FORTIFY_SOURCE -o /trigger.so /tmp/trigger.c -ldl \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /previous-handler.so /tmp/previous_handler.c
 
-FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}
+FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}${DEBIAN_RELEASE:+-}${DEBIAN_RELEASE}
 
 RUN frankenphp version
 

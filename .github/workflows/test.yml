@@ -41,13 +41,14 @@ jobs:
           cd testhooks && go vet ./...
 
   frankenphp:
-    name: FrankenPHP 1.x (${{ matrix.runner }}, ${{ matrix.optimization }}, ${{ matrix.buildmode }})
+    name: FrankenPHP 1.x (${{ matrix.runner }}, ${{ matrix.optimization }}, ${{ matrix.buildmode }}${{ matrix.debian && format(', {0}', matrix.debian) || '' }})
     strategy:
       fail-fast: false
       matrix:
         runner: [ ubuntu-latest, ubuntu-24.04-arm ]
         optimization: [ '-O0', '-O2' ]
         buildmode: [ exe ]
+        debian: [ '' ]
         include:
           - runner: ubuntu-latest
             optimization: '-O2'
@@ -55,6 +56,14 @@ jobs:
           - runner: ubuntu-24.04-arm
             optimization: '-O2'
             buildmode: pie
+          - runner: ubuntu-latest
+            optimization: '-O2'
+            buildmode: exe
+            debian: bookworm
+          - runner: ubuntu-24.04-arm
+            optimization: '-O2'
+            buildmode: exe
+            debian: bookworm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
@@ -62,7 +71,7 @@ jobs:
       - name: Crash FrankenPHP and check the reports
         run: |
           set -o pipefail
-          docker build --pull --progress plain --build-arg CGO_OPTIMIZATION=${{ matrix.optimization }} --build-arg GO_BUILDMODE=${{ matrix.buildmode }} -t crash-reporter-test -f test/Dockerfile . 2>&1 | tee build.log
+          docker build --pull --progress plain --build-arg CGO_OPTIMIZATION=${{ matrix.optimization }} --build-arg GO_BUILDMODE=${{ matrix.buildmode }} --build-arg DEBIAN_RELEASE=${{ matrix.debian }} -t crash-reporter-test -f test/Dockerfile . 2>&1 | tee build.log
 
       - name: Crash FrankenPHP running as PID 1
         run: sh test/pid1.sh crash-reporter-test

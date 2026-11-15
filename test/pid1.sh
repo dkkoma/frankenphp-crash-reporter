@@ -57,16 +57,23 @@ fi
 expect_reports 1
 
 crash_as_pid1 "disabled: abort() on a PHP thread while FrankenPHP is PID 1" false "$url?crash=abort"
-if [ "$running" != false ]; then
-    fail "$case_name: the process did not end"
-fi
+running_without_reporter=$running
 status_without_reporter=$status
 
 crash_as_pid1 "abort() on a PHP thread while FrankenPHP is PID 1" true "$url?crash=abort"
-if [ "$running" != false ] || [ "$status" -ne "$status_without_reporter" ]; then
-    fail "$case_name: running=$running, exit status is $status, want $status_without_reporter"
+if [ "$running_without_reporter" = false ]; then
+    if [ "$running" != false ] || [ "$status" -ne "$status_without_reporter" ]; then
+        fail "$case_name: running=$running, exit status is $status, want $status_without_reporter"
+    fi
+    expect_reports 1
+elif [ "$running" = false ]; then
+    if [ "$status" -ne 139 ]; then
+        fail "$case_name: exit status is $status, want 139"
+    fi
+    expect_reports 2
+else
+    expect_reports 1
 fi
-expect_reports 1
 
 crash_as_pid1 "disabled: SIGILL on a C thread while FrankenPHP is PID 1" false "$hooks/ill-on-c-thread"
 expect_running

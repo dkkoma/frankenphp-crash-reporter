@@ -369,12 +369,12 @@ static void format_report(const char *thread_name)
     out[out_len++] = '\n';
 }
 
-static void report(void)
+static int report(void)
 {
     struct timespec interval = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
     for (int waits = 0; atomic_flag_test_and_set(&reporting); waits++) {
         if (waits == 100) {
-            return;
+            return 0;
         }
         nanosleep(&interval, NULL);
     }
@@ -394,6 +394,7 @@ static void report(void)
 
     write_all(out, out_len);
     atomic_flag_clear(&reporting);
+    return 1;
 }
 
 static _Unwind_Reason_Code record_frame(struct _Unwind_Context *context, void *unused)
@@ -473,8 +474,7 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
         if (!captured) {
             capture(sig, info, ucontext);
         }
-        if (first_signal != last_reported_signal || first_pc != last_reported_pc) {
-            report();
+        if ((first_signal != last_reported_signal || first_pc != last_reported_pc) && report()) {
             last_reported_signal = first_signal;
             last_reported_pc = first_pc;
         }
