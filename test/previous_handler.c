@@ -66,6 +66,13 @@ int previous_handler_probe(void *addr)
     return 1;
 }
 
+static void returning_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    (void)sig;
+    (void)info;
+    (void)ucontext;
+}
+
 static void plain_handler(int sig)
 {
     say(sig == SIGSEGV ? "plain previous handler got SIGSEGV\n" : "plain previous handler got something else\n");
@@ -81,6 +88,15 @@ __attribute__((constructor)) static void install(void)
         action.sa_handler = SIG_IGN;
     } else if (kind && strcmp(kind, "plain") == 0) {
         action.sa_handler = plain_handler;
+    } else if (kind && strcmp(kind, "return") == 0) {
+        action.sa_sigaction = returning_handler;
+        action.sa_flags = SA_SIGINFO;
+        sigaction(SIGABRT, &action, NULL);
+    } else if (kind && strcmp(kind, "default_with_siginfo") == 0) {
+        action.sa_handler = SIG_DFL;
+        action.sa_flags = SA_SIGINFO;
+        sigaction(SIGBUS, &action, NULL);
+        return;
     } else if (kind && strcmp(kind, "probe") == 0) {
         action.sa_sigaction = probing_handler;
         action.sa_flags = SA_SIGINFO | SA_ONSTACK;

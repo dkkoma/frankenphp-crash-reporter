@@ -85,11 +85,11 @@ time, only the first one is reported.
 |---|---|
 | `signal` | Signal number (11 SIGSEGV, 7 SIGBUS, 8 SIGFPE, 4 SIGILL, 6 SIGABRT) |
 | `code` | `si_code`. Positive values come from the kernel (a bad memory access, for example). Zero or negative values mean the signal was sent with `raise` / `kill`; `abort()` gives -6 |
-| `fault_addr` | The address the instruction tried to access. `null` when `code` is zero or negative |
+| `fault_addr` | For SIGSEGV and SIGBUS, the address the instruction tried to access. For SIGILL and SIGFPE, the address of the instruction. `null` when `code` is zero or negative. On amd64 an access to a non-canonical address (`0x4141414141414141`, for example) gives `code` 128 and `0x0` here, which is not a NULL dereference |
 | `process` | Name of the process |
 | `tid` / `thread` | ID and name of the crashed thread. FrankenPHP names its PHP threads `php-N` |
 | `pc` | Where the crashed instruction is, as `module path+offset from the module start` |
-| `return_address` | Present only when the callers cannot be walked from `pc`, which happens after a call through a NULL or corrupted function pointer. It is the return address of that call (top of the stack on amd64, the link register on arm64), or `null` if it could not be read |
+| `return_address` | Present only when the callers cannot be walked from `pc`. It is the value at the top of the stack on amd64 and the link register on arm64, or `null` if it could not be read. After a call through a NULL or corrupted function pointer, that is the return address of the call. When `pc` is in code without unwind information (JIT-compiled code, for example), it is only a hint and may not be a return address at all |
 | `callers` | Return addresses of the calling frames, nearest first, in the same form as `pc`. Empty when they cannot be walked from `pc` |
 | `callers_omitted` | Present only when callers were dropped from the far end to keep the line within 4096 bytes |
 | `build_ids` | GNU build ID of every module that appears in `pc`, `return_address` and `callers` |
@@ -191,18 +191,25 @@ lazy initialization of the unwinder does not happen inside a handler.
   alternate signal stack to every thread that has called into Go, which
   includes FrankenPHP's PHP threads. A thread created in C that never calls
   into Go has none unless it sets one up.
-- If a handler that was installed before the program started recovers from a
-  fault instead of ending the process, the line is printed although the
-  process keeps running. A later fault is reported again.
+- If a handler that was installed before the program started returns instead
+  of ending the process, the line is printed although the process keeps
+  running. A later fault is reported again, unless it is the same signal at
+  the same instruction on the same thread as the last one reported there.
+  With such a handler, threads that crash at the same time may each be
+  reported, and their lines may be mixed up.
+- After the process survives a signal that was sent with `kill` to a thread
+  not created by Go, the Go runtime puts its own handler back in front of
+  this one for that signal. From then on, a report for SIGSEGV, SIGBUS or
+  SIGFPE has no `callers`, and SIGILL and SIGABRT are not reported.
 - If another library installs a handler for the same signals after the Go
   runtime has started, it replaces both the Go handler and this one.
 - If the program subscribes to SIGSEGV, SIGBUS or SIGFPE with
   `os/signal.Notify`, or ignores them with `os/signal.Ignore`, the process ends
   differently once the reporter is enabled. A fault in C code called from a
   goroutine ends with the default action of the signal, without Go's
-  traceback. A fault on a thread not created by Go also ends with the default
-  action; without the reporter that thread faults in a loop and the process
-  keeps running.
+  traceback. With `os/signal.Notify`, a fault on a thread not created by Go
+  also ends with the default action; without the reporter that thread faults
+  in a loop and the process keeps running.
 - When Go code crashes in a way the runtime does not recover from, only the
   runtime's own output is printed, except for SIGILL and SIGABRT.
 

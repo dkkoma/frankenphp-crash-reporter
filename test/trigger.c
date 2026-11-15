@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pwd.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -114,6 +115,13 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, s
         if (fault) {
             fault();
         }
+    }
+    if (strcmp(name, "non_canonical_address") == 0) {
+        static volatile uintptr_t address = 0x4141414141414141;
+        *(volatile char *)address = 1;
+    }
+    if (strcmp(name, "raise_abort") == 0) {
+        raise(SIGABRT);
     }
     if (strcmp(name, "probe") == 0) {
         int (*probe)(void *) = dlsym(RTLD_DEFAULT, "previous_handler_probe");

@@ -55,6 +55,8 @@ static TLS int first_frame_count;
 static TLS int first_callers_start;
 static TLS int captured;
 static TLS int handed_back_to_go;
+static TLS int last_reported_signal;
+static TLS uintptr_t last_reported_pc;
 static TLS volatile sig_atomic_t faults_recoverable;
 static TLS sigjmp_buf recover_from_fault;
 
@@ -664,20 +666,24 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
         if (!captured) {
             capture(sig, info, ucontext);
         }
-        report();
+        if (first_signal != last_reported_signal || first_pc != last_reported_pc) {
+            report();
+            last_reported_signal = first_signal;
+            last_reported_pc = first_pc;
+        }
     }
     const struct sigaction *previous = &previous_actions[sig];
-    if (previous->sa_flags & SA_SIGINFO) {
-        allow_next_report();
-        previous->sa_sigaction(sig, info, ucontext);
-        return;
-    }
     if (previous->sa_handler == SIG_IGN) {
+        allow_next_report();
         return;
     }
     if (previous->sa_handler != SIG_DFL) {
         allow_next_report();
-        previous->sa_handler(sig);
+        if (previous->sa_flags & SA_SIGINFO) {
+            previous->sa_sigaction(sig, info, ucontext);
+        } else {
+            previous->sa_handler(sig);
+        }
         return;
     }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
@@ -708,6 +714,7 @@ static void report_then_go(int sig, siginfo_t *info, void *ucontext)
     capture(sig, info, ucontext);
     report();
     go_actions[sig].sa_sigaction(sig, info, ucontext);
+    allow_next_report();
 }
 
 __attribute__((constructor)) static void install_before_go_runtime(void)

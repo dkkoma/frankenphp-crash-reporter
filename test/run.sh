@@ -190,6 +190,28 @@ if start "disabled: SIGSEGV sent to a C thread"; then
     finish
 fi
 
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=return
+if start "disabled: SIGSEGV on a PHP thread with a handler installed before the program started that returns without recovering"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "$case_name: the process ended"
+    fi
+    kill -KILL "$pid"
+    wait "$pid"
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=default_with_siginfo
+if start "disabled: SIGBUS on a PHP thread while its default action was set with SA_SIGINFO before the program started"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    crash "$url?crash=bus"
+    expect_status 135
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
 if start "disabled: SIGBUS on a PHP thread"; then
     crash "$url?crash=bus"
     expect_status 135
@@ -300,6 +322,15 @@ if [ "$(uname -m)" = x86_64 ]; then
     fi
 fi
 
+if [ "$(uname -m)" = x86_64 ]; then
+    if start "write to a non-canonical address on a PHP thread"; then
+        crash "$url?crash=non_canonical_address"
+        expect_status 139
+        expect_report '"signal":11,' '"code":128,' '"fault_addr":"0x0"' '"thread":"php-'
+        finish
+    fi
+fi
+
 if start "SIGSEGV in a module whose ELF header is not readable"; then
     crash "$url?crash=unreadable_elf_header"
     expect_status 139
@@ -393,6 +424,44 @@ if start "a handler installed before the program started jumps out of a fault, t
     expect_status 77
     expect_count "previous handler got a fault outside a probe" 1
     expect_count '"message":"fatal signal"' 2
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=return
+if start "SIGSEGV on a PHP thread with a handler installed before the program started that returns without recovering"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    curl -s -o /dev/null --max-time 2 "$url?crash=segv"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        fail "$case_name: the process ended"
+    fi
+    kill -KILL "$pid"
+    wait "$pid"
+    expect_count '"message":"fatal signal"' 1
+    if [ "$failures" -ne "$failures_before" ]; then
+        echo "(log omitted)"
+    fi
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=return
+if start "a handler installed before the program started returns from SIGABRT, then a second fault is fatal"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    expect_body "$url?crash=raise_abort" "ok"
+    expect_count '"message":"fatal signal"' 1
+    crash "$url?crash=bus"
+    expect_status 135
+    expect_count '"message":"fatal signal"' 2
+    finish
+fi
+unset LD_PRELOAD PREVIOUS_HANDLER
+
+export LD_PRELOAD=/usr/local/lib/previous-handler.so PREVIOUS_HANDLER=default_with_siginfo
+if start "SIGBUS on a PHP thread while its default action was set with SA_SIGINFO before the program started"; then
+    unset LD_PRELOAD PREVIOUS_HANDLER
+    crash "$url?crash=bus"
+    expect_status 135
+    expect_report '"signal":7,' '"thread":"php-'
     finish
 fi
 unset LD_PRELOAD PREVIOUS_HANDLER
