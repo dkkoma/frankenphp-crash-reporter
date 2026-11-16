@@ -22,9 +22,9 @@ before the process dies:
 The reporter only adds this line. The process ends the way it does without
 the reporter: by the same signal, with the same exit status.
 
-A few setups behave differently, such as FrankenPHP running as PID 1 of a
-container without an init process. They are collected under
-[Special cases](#special-cases).
+When FrankenPHP runs as PID 1 of a container, a crash ends differently, with
+and without the reporter; see [FrankenPHP as PID 1](#frankenphp-as-pid-1).
+A few uncommon setups are covered under [Special cases](#special-cases).
 
 ## Requirements
 
@@ -198,6 +198,24 @@ does not happen inside a handler.
 | Go code, recovered panic | no | keeps running |
 | Go code, unrecovered panic | no | Go's panic output |
 
+## FrankenPHP as PID 1
+
+When FrankenPHP is PID 1 of a container (there is no init process in front of
+it), the kernel discards a signal the process sends to itself while the action
+of that signal is the default one. The Go runtime ends the process that way,
+so the outcome of a crash outside Go code differs:
+
+| Crash | Without the reporter | With the reporter |
+|---|---|---|
+| SIGSEGV, SIGBUS, SIGFPE | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
+| `abort()` with glibc 2.41 or later | The process ends, but not by SIGABRT: glibc falls back to an instruction that raises another fatal signal | The line is printed, and the process ends the same way |
+| `abort()` with an older glibc, on arm64 | The process does not end | The line is printed, and the process does not end |
+| `abort()` with an older glibc, on amd64 | The process does not end | The line is printed, followed by a line for the SIGSEGV glibc falls back to (`"code":128`). The process then exits as in the first row |
+| SIGILL | The process does not end, as above | The line is printed once, and the process does not end |
+
+With an init process (`docker run --init`, for example) FrankenPHP is not
+PID 1 and the process ends the same way with and without the reporter.
+
 ## What is not reported
 
 - SIGKILL cannot be caught, so an out-of-memory kill leaves no line.
@@ -217,24 +235,6 @@ does not happen inside a handler.
 
 Most deployments can skip this section. It lists the setups in which the
 reporter behaves differently from the description above.
-
-### FrankenPHP as PID 1
-
-When FrankenPHP is PID 1 of a container (there is no init process in front of
-it), the kernel discards a signal the process sends to itself while the action
-of that signal is the default one. The Go runtime ends the process that way,
-so the outcome of a crash outside Go code differs:
-
-| Crash | Without the reporter | With the reporter |
-|---|---|---|
-| SIGSEGV, SIGBUS, SIGFPE | The process does not end. The crashed thread repeats the faulting instruction, its request hangs, and the other threads keep serving | The line is printed, and about a second later the process exits with status 128 + signal number. It is an exit, not a death by signal, so there is no core dump |
-| `abort()` with glibc 2.41 or later | The process ends, but not by SIGABRT: glibc falls back to an instruction that raises another fatal signal | The line is printed, and the process ends the same way |
-| `abort()` with an older glibc, on arm64 | The process does not end | The line is printed, and the process does not end |
-| `abort()` with an older glibc, on amd64 | The process does not end | The line is printed, followed by a line for the SIGSEGV glibc falls back to (`"code":128`). The process then exits as in the first row |
-| SIGILL | The process does not end, as above | The line is printed once, and the process does not end |
-
-With an init process (`docker run --init`, for example) FrankenPHP is not
-PID 1 and the process ends the same way with and without the reporter.
 
 ### `GOTRACEBACK=crash`
 
