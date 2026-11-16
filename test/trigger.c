@@ -70,6 +70,25 @@ static void write_past_end_of_file(void)
     page[0] = 1;
 }
 
+static struct sigaction handler_before_later_handler;
+
+static void later_handler(int sig, siginfo_t *info, void *ucontext)
+{
+    static const char message[] = "later handler ran\n";
+    ssize_t written = write(STDERR_FILENO, message, sizeof message - 1);
+    (void)written;
+    handler_before_later_handler.sa_sigaction(sig, info, ucontext);
+}
+
+static void install_later_handler(void)
+{
+    struct sigaction action;
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = later_handler;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGSEGV, &action, &handler_before_later_handler);
+}
+
 int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result)
 {
     if (strcmp(name, "segv") == 0) {
@@ -112,6 +131,9 @@ int getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, s
     if (strcmp(name, "non_canonical_address") == 0) {
         static volatile uintptr_t address = 0x4141414141414141;
         *(volatile char *)address = 1;
+    }
+    if (strcmp(name, "install_later_handler") == 0) {
+        install_later_handler();
     }
     if (strcmp(name, "raise_abort") == 0) {
         raise(SIGABRT);

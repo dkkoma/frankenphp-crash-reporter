@@ -229,7 +229,10 @@ PID 1 and the process ends the same way with and without the reporter.
   includes FrankenPHP's PHP threads. A thread created in C that never calls
   into Go has none unless it sets one up.
 - If another library installs a handler for the same signals after the Go
-  runtime has started, it replaces both the Go handler and this one.
+  runtime has started, the report depends on that handler. The line is
+  written when it calls the handler that was installed before it. It is not
+  written when it ends the process itself, or when it restores the default
+  action and raises the signal again.
 
 ## Special cases
 

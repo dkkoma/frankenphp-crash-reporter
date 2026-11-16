@@ -220,6 +220,14 @@ if start "disabled: SIGBUS on a PHP thread while its default action was set with
 fi
 unset LD_PRELOAD PREVIOUS_HANDLER
 
+if start "disabled: SIGSEGV on a PHP thread with a handler installed after the program started that calls the previous one"; then
+    expect_body "$url?crash=install_later_handler" "ok"
+    crash "$url?crash=segv"
+    expect_status 139
+    expect_count "later handler ran" 1
+    finish
+fi
+
 if start "disabled: SIGBUS on a PHP thread"; then
     crash "$url?crash=bus"
     expect_status 135
@@ -313,6 +321,17 @@ fi
 kill "$stuck_reader"
 rm -f "$stderr_fifo"
 unset stderr_fifo
+
+if start "SIGSEGV on a PHP thread with a handler installed after the program started that calls the previous one"; then
+    expect_body "$url?crash=install_later_handler" "ok"
+    expect_body "$hooks/go-nil" "recovered=1"
+    expect_count "later handler ran" 1
+    crash "$url?crash=segv"
+    expect_status 139
+    expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+' '"callers":["/usr/local/lib/libphp.so+'
+    expect_count "later handler ran" 2
+    finish
+fi
 
 if start "SIGBUS on a PHP thread"; then
     crash "$url?crash=bus"
