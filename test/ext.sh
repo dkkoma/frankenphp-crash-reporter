@@ -153,6 +153,61 @@ if start "extension: SIGSEGV on two C threads at the same time"; then
     finish
 fi
 
+# A reload through the admin API restarts PHP: MSHUTDOWN, then MINIT.
+config=/tmp/Caddyfile.admin
+sed '/admin off/d' /crash-reporter-test/Caddyfile > "$config"
+
+reload() {
+    if ! frankenphp reload --config "$config" --adapter caddyfile --force > /dev/null 2>&1; then
+        fail "$case_name: the reload failed"
+        return 1
+    fi
+    for _ in $(seq 1 300); do
+        if [ "$(count "$armed")" -ge 2 ] && curl -fs -o /dev/null "$url"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    fail "$case_name: the extension was not armed again after the reload"
+    return 1
+}
+
+if start "extension: armed again after a reload"; then
+    if reload; then
+        expect_body "$hooks/go-nil" "recovered=1"
+        crash "$url?crash=segv"
+        expect_status 139
+        expect_count "$armed" 2
+        expect_count "crash reporter not armed" 0
+        expect_report '"signal":11,' '"thread":"php-' '"php_frames":[{"function":"posix_getpwnam"},'
+    else
+        kill -KILL "$pid"
+        wait_exit
+    fi
+    finish
+fi
+
+if start "extension: armed again after a reload with a handler installed after the extension"; then
+    expect_body "$url?crash=install_later_handler" "ok"
+    if reload; then
+        expect_body "$hooks/go-nil" "recovered=1"
+        crash "$url?crash=segv"
+        expect_status 139
+        expect_count "$armed" 2
+        expect_count "crash reporter not armed" 0
+        expect_report '"signal":11,' '"thread":"php-' '"pc":"/usr/local/lib/trigger.so+'
+        # Once for the Go panic and once for the crash, with no loop between
+        # the two handlers.
+        expect_count "later handler ran" 2
+    else
+        kill -KILL "$pid"
+        wait_exit
+    fi
+    finish
+fi
+
+config=/crash-reporter-test/Caddyfile
+
 export GOTRACEBACK=crash
 if start "extension: Go aborts itself after an unrecovered panic"; then
     crash "$hooks/go-panic"

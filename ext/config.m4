@@ -8,6 +8,10 @@ if test "$PHP_CRASH_REPORTER" != "no"; then
     linux*) ;;
     *) AC_MSG_ERROR([crash_reporter supports Linux only]) ;;
   esac
+  case $host_cpu in
+    x86_64|aarch64) ;;
+    *) AC_MSG_ERROR([crash_reporter supports amd64 and arm64 only]) ;;
+  esac
   dnl crash_report.h is shared with the Go module at the root of the repository.
   PHP_NEW_EXTENSION(crash_reporter, crash_reporter.c handler.c, $ext_shared,, [-I@ext_srcdir@/.. -fvisibility=hidden])
 fi

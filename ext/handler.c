@@ -20,6 +20,10 @@
 static const int handled[] = {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT};
 
 static struct sigaction previous_actions[NSIG];
+// Whether on_signal is in the chain for the signal. disarm leaves it there
+// when another handler was installed after it, and that handler may still
+// call it; the next arm then keeps the saved Go handler.
+static int installed[NSIG];
 static atomic_int armed;
 static uintptr_t go_text_start;
 static uintptr_t go_text_end;
@@ -30,6 +34,11 @@ static sigjmp_buf guard;
 static pid_t last_reported_tid;
 static int last_reported_signal;
 static uintptr_t last_reported_pc;
+static uint64_t last_reported_at;
+
+// The same fault again within this time is the instruction faulting again
+// after a handler returned. A later one is a new crash.
+#define REFAULT_WINDOW_NS (1000ULL * 1000 * 1000)
 
 struct walk {
     void *frames[MAX_FRAMES];
@@ -42,6 +51,13 @@ static struct php_frames php_state;
 static pid_t current_tid(void)
 {
     return (pid_t)syscall(SYS_gettid);
+}
+
+static uint64_t monotonic_ns(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000 * 1000 * 1000 + (uint64_t)now.tv_nsec;
 }
 
 // Runs fn with SIGSEGV and SIGBUS unblocked. A fault inside it returns here
@@ -140,7 +156,9 @@ static void report(int sig, siginfo_t *info, void *ucontext, uintptr_t pc)
         return;
     }
     pid_t tid = current_tid();
-    if (tid == last_reported_tid && sig == last_reported_signal && pc == last_reported_pc) {
+    uint64_t now = monotonic_ns();
+    if (tid == last_reported_tid && sig == last_reported_signal && pc == last_reported_pc &&
+        now - last_reported_at < REFAULT_WINDOW_NS) {
         unlock_reports();
         return;
     }
@@ -172,23 +190,8 @@ static void report(int sig, siginfo_t *info, void *ucontext, uintptr_t pc)
     last_reported_tid = tid;
     last_reported_signal = sig;
     last_reported_pc = pc;
+    last_reported_at = now;
     unlock_reports();
-}
-
-static void call_previous(int sig, siginfo_t *info, void *ucontext)
-{
-    const struct sigaction *previous = &previous_actions[sig];
-    if (previous->sa_handler == SIG_IGN) {
-        return;
-    }
-    if (previous->sa_handler == SIG_DFL) {
-        die_by_default(sig);
-    }
-    if (previous->sa_flags & SA_SIGINFO) {
-        previous->sa_sigaction(sig, info, ucontext);
-    } else {
-        previous->sa_handler(sig);
-    }
 }
 
 static void on_signal(int sig, siginfo_t *info, void *ucontext)
@@ -200,7 +203,9 @@ static void on_signal(int sig, siginfo_t *info, void *ucontext)
     if (atomic_load(&armed) && !in_go_code(pc)) {
         report(sig, info, ucontext, pc);
     }
-    call_previous(sig, info, ucontext);
+    if (!call_action(&previous_actions[sig], sig, info, ucontext)) {
+        die_by_default(sig);
+    }
 }
 
 struct executable {
@@ -266,6 +271,23 @@ static int module_data_matches(const struct module_data *md, uintptr_t header_ad
            md->maxpc <= md->etext;
 }
 
+// Looks for runtime.firstmoduledata in [start, start+size) and, if found,
+// sets the range of Go code from it.
+static int find_module_data(uintptr_t start, uintptr_t size, uintptr_t header_addr)
+{
+    uintptr_t first = (start + sizeof(uintptr_t) - 1) & ~(uintptr_t)(sizeof(uintptr_t) - 1);
+    uintptr_t last = start + size - sizeof(struct module_data);
+    for (uintptr_t p = first; p <= last; p += sizeof(uintptr_t)) {
+        const struct module_data *md = (const struct module_data *)p;
+        if (module_data_matches(md, header_addr)) {
+            go_text_start = md->text;
+            go_text_end = md->etext;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Finds the code of the Go program, [runtime.text, runtime.etext), from the
 // section headers of the executable: the pclntab section gives the address of
 // runtime.pcHeader, and runtime.firstmoduledata, in a data section, is the
@@ -313,22 +335,17 @@ static int find_go_text(uintptr_t bias)
         goto done;
     }
 
-    for (int i = 0; i < eh.e_shnum && !found; i++) {
-        const ElfW(Shdr) *s = &sections[i];
-        if (!(s->sh_flags & SHF_ALLOC) || !(s->sh_flags & SHF_WRITE) || s->sh_type == SHT_NOBITS ||
-            s->sh_size < sizeof(struct module_data)) {
-            continue;
-        }
-        uintptr_t start = (bias + s->sh_addr + sizeof(uintptr_t) - 1) & ~(uintptr_t)(sizeof(uintptr_t) - 1);
-        uintptr_t end = bias + s->sh_addr + s->sh_size - sizeof(struct module_data);
-        for (uintptr_t p = start; p <= end; p += sizeof(uintptr_t)) {
-            const struct module_data *md = (const struct module_data *)p;
-            if (md->pc_header == header_addr && module_data_matches(md, header_addr)) {
-                go_text_start = md->text;
-                go_text_end = md->etext;
-                found = 1;
-                break;
+    // The Go linker puts runtime.firstmoduledata in .noptrdata; look there
+    // first, then in every other writable section.
+    for (int pass = 0; pass < 2 && !found; pass++) {
+        for (int i = 0; i < eh.e_shnum && !found; i++) {
+            const ElfW(Shdr) *s = &sections[i];
+            if (!(s->sh_flags & SHF_ALLOC) || !(s->sh_flags & SHF_WRITE) || s->sh_type == SHT_NOBITS ||
+                s->sh_size < sizeof(struct module_data) || s->sh_name >= strtab->sh_size ||
+                ends_with(names + s->sh_name, ".noptrdata") != (pass == 0)) {
+                continue;
             }
+            found = find_module_data(bias + s->sh_addr, s->sh_size, header_addr);
         }
     }
 
@@ -344,22 +361,18 @@ static int is_ours(const struct sigaction *action)
     return (action->sa_flags & SA_SIGINFO) && action->sa_sigaction == on_signal;
 }
 
-// The Go runtime installs its handler with SA_SIGINFO and SA_ONSTACK for each
-// of these signals. Anything else means the process is not what this
-// extension expects.
+// The Go runtime installs its handler, which is Go code, with SA_SIGINFO and
+// SA_ONSTACK for each of these signals. Anything else, such as the handlers of
+// the Go module of this repository or of another extension, means the process
+// is not what this extension expects.
 static int is_go_handler(const struct sigaction *action)
 {
-    return (action->sa_flags & SA_SIGINFO) && (action->sa_flags & SA_ONSTACK) && action->sa_handler != SIG_DFL &&
-           action->sa_handler != SIG_IGN && !is_ours(action);
+    return (action->sa_flags & SA_SIGINFO) && (action->sa_flags & SA_ONSTACK) &&
+           in_go_code((uintptr_t)action->sa_sigaction);
 }
 
 HIDDEN int crash_reporter_ext_arm(void)
 {
-    const char *go_module = getenv("FRANKENPHP_CRASH_REPORTER");
-    if (go_module && strcmp(go_module, "true") == 0) {
-        return ERR_GO_MODULE_ENABLED;
-    }
-
     struct executable exe = {0};
     dl_iterate_phdr(first_object, &exe);
     if (!exe.header || memcmp(((const ElfW(Ehdr) *)exe.header)->e_ident, ELFMAG, SELFMAG) != 0) {
@@ -372,10 +385,17 @@ HIDDEN int crash_reporter_ext_arm(void)
         return ERR_GO_TEXT;
     }
 
+    struct sigaction current[COUNT(handled)];
+    memset(current, 0, sizeof current);
     for (size_t i = 0; i < COUNT(handled); i++) {
-        if (sigaction(handled[i], NULL, &previous_actions[handled[i]]) != 0 ||
-            !is_go_handler(&previous_actions[handled[i]])) {
-            return ERR_GO_HANDLERS;
+        int sig = handled[i];
+        if (installed[sig]) {
+            continue;
+        }
+        if (sigaction(sig, NULL, &current[i]) != 0 || !is_go_handler(&current[i])) {
+            // The Go module installs its handlers in front of the Go runtime's.
+            const char *go_module = getenv("FRANKENPHP_CRASH_REPORTER");
+            return go_module && strcmp(go_module, "true") == 0 ? ERR_GO_MODULE_ENABLED : ERR_GO_HANDLERS;
         }
     }
 
@@ -393,13 +413,18 @@ HIDDEN int crash_reporter_ext_arm(void)
 
     for (size_t i = 0; i < COUNT(handled); i++) {
         int sig = handled[i];
-        struct sigaction ours = previous_actions[sig];
+        if (installed[sig]) {
+            continue;
+        }
+        previous_actions[sig] = current[i];
+        struct sigaction ours = current[i];
         ours.sa_sigaction = on_signal;
         ours.sa_flags |= SA_SIGINFO | SA_ONSTACK;
         if (sigaction(sig, &ours, NULL) != 0) {
             crash_reporter_ext_disarm();
             return ERR_INSTALL;
         }
+        installed[sig] = 1;
     }
     atomic_store(&armed, 1);
     return ARMED;
@@ -411,8 +436,9 @@ HIDDEN void crash_reporter_ext_disarm(void)
     for (size_t i = 0; i < COUNT(handled); i++) {
         int sig = handled[i];
         struct sigaction current;
-        if (sigaction(sig, NULL, &current) == 0 && is_ours(&current)) {
-            sigaction(sig, &previous_actions[sig], NULL);
+        if (installed[sig] && sigaction(sig, NULL, &current) == 0 && is_ours(&current) &&
+            sigaction(sig, &previous_actions[sig], NULL) == 0) {
+            installed[sig] = 0;
         }
     }
 }

@@ -3,6 +3,7 @@
 log=/tmp/frankenphp.log
 url=http://127.0.0.1:8080/
 hooks=http://127.0.0.1:8081
+config=/crash-reporter-test/Caddyfile
 failures=0
 
 export CRASH_REPORTER_TEST_HOOKS=127.0.0.1:8081
@@ -18,9 +19,9 @@ start() {
     case_name=$1
     failures_before=$failures
     if [ -n "${stderr_fifo:-}" ]; then
-        frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile > /dev/null 2> "$stderr_fifo" &
+        frankenphp run --config "$config" --adapter caddyfile > /dev/null 2> "$stderr_fifo" &
     else
-        frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile > "$log" 2>&1 &
+        frankenphp run --config "$config" --adapter caddyfile > "$log" 2>&1 &
     fi
     pid=$!
     for _ in $(seq 1 300); do

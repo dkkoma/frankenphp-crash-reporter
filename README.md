@@ -296,7 +296,8 @@ instead it is in front of the Go handler, and does what the `os/signal`
 documentation asks of non-Go code that installs a handler for a synchronous
 signal (["Go programs that use cgo or SWIG"](https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG)):
 
-- It saves the Go handler it replaces.
+- It saves the Go handler it replaces, and stays off if the handler in place
+  is not Go code.
 - It decides from the PC whether the signal hit Go code. Only a signal outside
   the code of the Go program is reported.
 - It always calls the Go handler afterwards, with the original arguments. The
@@ -320,6 +321,10 @@ match.
 | SIGSEGV, SIGBUS, SIGFPE on a PHP thread, FrankenPHP as PID 1 | reported, then the process exits about a second later with status 128 + signal number | reported once; the process does not end, as without a reporter |
 | `abort()` on a PHP thread, FrankenPHP as PID 1 | see [FrankenPHP as PID 1](#frankenphp-as-pid-1) | reported; the process ends as without a reporter. With an older glibc on amd64, the SIGSEGV glibc falls back to is reported too, and the process does not end |
 
+A configuration reload through the admin API restarts PHP, and the extension
+is armed again. If another handler was installed after the extension, the
+extension stays in the chain behind it and keeps the Go handler it saved.
+
 A handler installed before the program started and `os/signal.Notify` on
 these signals are not tested with the extension yet.
 
@@ -330,8 +335,10 @@ these signals are not tested with the extension yet.
 - Built against the same PHP (version and ZTS) as the FrankenPHP it is loaded
   into
 
-Do not enable the Go module at the same time: when
-`FRANKENPHP_CRASH_REPORTER=true`, the extension stays off and says so.
+Do not enable the Go module at the same time: when the Go module is armed, its
+handlers are in front of the Go runtime's, and the extension stays off and says
+so. With `FRANKENPHP_CRASH_REPORTER=true` set but no Go module in the
+executable, the extension is armed as usual.
 
 ### Installation
 

@@ -27,6 +27,10 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#if !defined(__x86_64__) && !defined(__aarch64__)
+#error "the crash reporter supports amd64 and arm64 only"
+#endif
+
 #define MAX_FRAMES 64
 #define MAX_NAME 256
 #define MAX_LINE PIPE_BUF
@@ -417,6 +421,24 @@ SHARED void write_report(const struct crash *crash, void (*append_extra)(void))
     format_report(crash, thread_name, append_extra);
 
     write_all(out, out_len);
+}
+
+// Calls the handler that action names. Returns 0, without calling anything,
+// when action is SIG_DFL.
+SHARED int call_action(const struct sigaction *action, int sig, siginfo_t *info, void *ucontext)
+{
+    if (action->sa_handler == SIG_DFL) {
+        return 0;
+    }
+    if (action->sa_handler == SIG_IGN) {
+        return 1;
+    }
+    if (action->sa_flags & SA_SIGINFO) {
+        action->sa_sigaction(sig, info, ucontext);
+    } else {
+        action->sa_handler(sig);
+    }
+    return 1;
 }
 
 SHARED void die_by_default(int sig)

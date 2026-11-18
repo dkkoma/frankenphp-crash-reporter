@@ -110,16 +110,7 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
             last_reported_pc = first_pc;
         }
     }
-    const struct sigaction *previous = &previous_actions[sig];
-    if (previous->sa_handler == SIG_IGN) {
-        return;
-    }
-    if (previous->sa_handler != SIG_DFL) {
-        if (previous->sa_flags & SA_SIGINFO) {
-            previous->sa_sigaction(sig, info, ucontext);
-        } else {
-            previous->sa_handler(sig);
-        }
+    if (call_action(&previous_actions[sig], sig, info, ucontext)) {
         return;
     }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
