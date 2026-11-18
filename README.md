@@ -26,6 +26,10 @@ When FrankenPHP runs as PID 1 of a container, a crash ends differently, with
 and without the reporter; see [FrankenPHP as PID 1](#frankenphp-as-pid-1).
 A few uncommon setups are covered under [Special cases](#special-cases).
 
+The same reporter is also available as an experimental PHP extension, which
+needs no custom FrankenPHP build and adds the PHP call stack to the line; see
+[PHP extension (experimental)](#php-extension-experimental).
+
 ## Requirements
 
 - Linux, amd64 or arm64
@@ -278,6 +282,105 @@ non-Go code, and so does the reporter, after writing the line.
   sent with `kill` goes to the channel and the process keeps running, but the
   line is printed.
 
+## PHP extension (experimental)
+
+The `ext` directory holds the reporter as a PHP extension. It loads into an
+official FrankenPHP Docker image like any other extension, so no custom build
+is needed, and it adds the PHP call stack to the line.
+
+### How it differs from the Go module
+
+The extension installs its handlers when PHP starts (`MINIT`), after the Go
+runtime has started. The Go runtime then no longer forwards signals to it;
+instead it is in front of the Go handler, and does what the `os/signal`
+documentation asks of non-Go code that installs a handler for a synchronous
+signal (["Go programs that use cgo or SWIG"](https://pkg.go.dev/os/signal#hdr-Go_programs_that_use_cgo_or_SWIG)):
+
+- It saves the Go handler it replaces.
+- It decides from the PC whether the signal hit Go code. Only a signal outside
+  the code of the Go program is reported.
+- It always calls the Go handler afterwards, with the original arguments. The
+  Go runtime then handles the signal and ends the process exactly as it does
+  without the extension.
+
+It does not rely on how the Go runtime treats a signal sent with `kill`, as
+the Go module does. What it relies on instead is the layout of two internal
+structures of the Go runtime: to find the code of the Go program
+(`runtime.text` to `runtime.etext`) in a stripped executable, it reads the
+pclntab header and `runtime.firstmoduledata`. Each field it uses is checked
+against the others at startup, and the extension stays off if they do not
+match.
+
+| Crash | Go module | Extension |
+|---|---|---|
+| C code on a PHP thread or any other thread not created by Go | reported | reported, with `php_frames` on a PHP thread |
+| C code called from a goroutine | reported, then Go's fatal error output | same |
+| Go code | not reported | not reported |
+| Unrecovered Go panic with `GOTRACEBACK=crash` | the SIGABRT of the Go runtime is reported | not reported |
+| SIGSEGV, SIGBUS, SIGFPE on a PHP thread, FrankenPHP as PID 1 | reported, then the process exits about a second later with status 128 + signal number | reported once; the process does not end, as without a reporter |
+
+A handler installed before the program started and `os/signal.Notify` on
+these signals are not tested with the extension yet.
+
+### Requirements
+
+- The requirements of the Go module above
+- FrankenPHP. Under any other SAPI the extension does nothing
+- Built against the same PHP (version and ZTS) as the FrankenPHP it is loaded
+  into
+
+Do not enable the Go module at the same time: when
+`FRANKENPHP_CRASH_REPORTER=true`, the extension stays off and says so.
+
+### Installation
+
+Build it with the `phpize` of the PHP that FrankenPHP runs, from a checkout of
+the whole repository (the extension includes `crash_report.h` from the root):
+
+```sh
+cd ext
+phpize
+./configure --enable-crash-reporter
+make
+make install
+```
+
+Then load it:
+
+```ini
+extension=crash_reporter
+```
+
+With the official Docker image, build it in the `-builder` image of the same
+version and copy `modules/crash_reporter.so` into the extension directory of
+the runtime image.
+
+### Output
+
+At startup it prints one of these lines:
+
+```json
+{"severity":"INFO","message":"crash reporter armed","source":"extension"}
+{"severity":"WARNING","message":"crash reporter not armed: ...","source":"extension"}
+```
+
+A report has the fields of the Go module, plus:
+
+| Field | Meaning |
+|---|---|
+| `php_frames` | The PHP call stack of the crashed thread, innermost first. Present only on a thread that has PHP globals. Each frame has `function` (`Class::method` for a method) and, for PHP code, `file` and `line`. A frame of an internal function, such as `posix_getpwnam`, has only `function`. A file without a function is top-level code |
+| `php_frames_omitted` | Present only when frames were dropped from the far end: beyond 32 frames, or to leave room for `callers` within 4096 bytes |
+
+```json
+{"severity":"CRITICAL","message":"fatal signal","signal":11,"code":1,"fault_addr":"0x0","tid":64,"thread":"php-3","pc":"/usr/local/lib/trigger.so+0x1234","php_frames":[{"function":"posix_getpwnam"},{"function":"nest","file":"/app/worker.php","line":9},{"function":"{closure:/app/worker.php:12}","file":"/app/worker.php","line":14},{"function":"frankenphp_handle_request"},{"file":"/app/worker.php","line":12}],"callers":["/usr/local/lib/libphp.so+0x6c75a8","..."]}
+```
+
+The line of a PHP frame is the line it was executing when it called the next
+frame. For the innermost PHP frame, when the crash is inside the engine itself
+rather than in an internal function it called, the line may be an earlier one.
+The frames are read from memory that the crash may have corrupted; if reading
+faults, the frames read before stay.
+
 ## Testing
 
 The test builds FrankenPHP with this module, crashes it in several ways, and
@@ -289,6 +392,11 @@ sh test/pid1.sh crash-reporter-test
 ```
 
 The second command crashes FrankenPHP running as PID 1 of a container.
+
+The image build also builds the PHP extension and runs `test/ext.sh`, which
+crashes the same FrankenPHP binary with the extension loaded and the Go module
+off. `test/pid1.sh` covers the extension as well. The `-O0` / `-O2` build
+argument applies to the extension too.
 
 This tests the latest FrankenPHP 1.x release. To test another one, pass
 `--build-arg FRANKENPHP_VERSION=<version>`.

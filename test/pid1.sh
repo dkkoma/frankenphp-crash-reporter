@@ -15,7 +15,7 @@ fail() {
 crash_as_pid1() {
     case_name=$1
     cid=$(docker run -d -e FRANKENPHP_CRASH_REPORTER="$2" -e LD_PRELOAD=/usr/local/lib/trigger.so \
-        -e CRASH_REPORTER_TEST_HOOKS=127.0.0.1:8081 "$image" \
+        -e CRASH_REPORTER_TEST_HOOKS=127.0.0.1:8081 -e PHP_INI_SCAN_DIR="${4:-}" "$image" \
         frankenphp run --config /crash-reporter-test/Caddyfile --adapter caddyfile)
     echo "== $case_name"
     for _ in $(seq 1 100); do
@@ -80,6 +80,20 @@ expect_running
 
 crash_as_pid1 "SIGILL on a C thread while FrankenPHP is PID 1" true "$hooks/ill-on-c-thread"
 expect_running
+expect_reports 1
+
+# The PHP extension leaves the end of the process to the Go runtime, so it ends
+# as it does without a reporter.
+ext=:/crash-reporter-test/ext-ini
+
+crash_as_pid1 "extension: SIGSEGV on a PHP thread while FrankenPHP is PID 1" false "$url?crash=segv" "$ext"
+expect_running
+expect_reports 1
+
+crash_as_pid1 "extension: abort() on a PHP thread while FrankenPHP is PID 1" false "$url?crash=abort" "$ext"
+if [ "$running" != "$running_without_reporter" ] || [ "$status" -ne "$status_without_reporter" ]; then
+    fail "$case_name: running=$running, exit status is $status, want running=$running_without_reporter, $status_without_reporter"
+fi
 expect_reports 1
 
 if [ "$failures" -ne 0 ]; then
