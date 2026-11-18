@@ -34,6 +34,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     && gcc -O2 -fPIC -shared -Wall -Wextra -fno-omit-frame-pointer -fstack-protector-all -U_FORTIFY_SOURCE -o /trigger.so /tmp/trigger.c -ldl \
     && gcc -O2 -fPIC -shared -Wall -Wextra -o /previous-handler.so /tmp/previous_handler.c
 
+RUN cp -r /src/crash-reporter /tmp/crash-reporter \
+    && cd /tmp/crash-reporter/ext \
+    && phpize \
+    && ./configure --enable-crash-reporter CFLAGS="${CGO_OPTIMIZATION} -g -Wall -Wextra -Werror" \
+    && make \
+    && cp modules/crash_reporter.so /crash_reporter.so
+
 FROM ${FRANKENPHP_IMAGE}:${FRANKENPHP_VERSION}${DEBIAN_RELEASE:+-}${DEBIAN_RELEASE}
 
 RUN frankenphp version
@@ -41,7 +48,11 @@ RUN frankenphp version
 COPY --from=builder /usr/local/bin/frankenphp /usr/local/bin/frankenphp
 COPY --from=builder /trigger.so /usr/local/lib/trigger.so
 COPY --from=builder /previous-handler.so /usr/local/lib/previous-handler.so
+COPY --from=builder /crash_reporter.so /usr/local/lib/crash_reporter.so
 COPY --from=builder /test-hooks-segv.symbol /crash-reporter-test/test-hooks-segv.symbol
-COPY test/Caddyfile test/worker.php test/run.sh /crash-reporter-test/
+COPY test/Caddyfile test/worker.php test/lib.sh test/run.sh test/ext.sh /crash-reporter-test/
+RUN mkdir /crash-reporter-test/ext-ini \
+    && echo 'extension=/usr/local/lib/crash_reporter.so' > /crash-reporter-test/ext-ini/crash_reporter.ini
 
 RUN sh /crash-reporter-test/run.sh
+RUN sh /crash-reporter-test/ext.sh

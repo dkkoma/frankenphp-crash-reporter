@@ -1,35 +1,11 @@
 //go:build linux && cgo && (amd64 || arm64)
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-#include <errno.h>
-#include <fcntl.h>
-#include <limits.h>
-#include <link.h>
-#include <poll.h>
-#include <pthread.h>
+#include "crash_report.h"
+
 #include <setjmp.h>
-#include <signal.h>
-#include <stdatomic.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/prctl.h>
-#include <sys/syscall.h>
-#include <sys/uio.h>
-#include <time.h>
-#include <ucontext.h>
-#include <unistd.h>
 #include <unwind.h>
 
 #define TLS __thread __attribute__((tls_model("initial-exec")))
-#define MAX_FRAMES 64
-#define MAX_NAME 256
-#define MAX_LINE PIPE_BUF
-#define MAX_CLOSING 32
-
-#define COUNT(a) (sizeof(a) / sizeof((a)[0]))
 
 static const int recoverable_in_go[] = {SIGSEGV, SIGBUS, SIGFPE};
 static const int always_fatal[] = {SIGILL, SIGABRT};
@@ -41,8 +17,6 @@ extern const ElfW(Ehdr) __ehdr_start __attribute__((visibility("hidden")));
 static struct sigaction go_actions[NSIG];
 static struct sigaction previous_actions[NSIG];
 static atomic_int state = NOT_INSTALLED;
-static atomic_flag reporting = ATOMIC_FLAG_INIT;
-static int executable_is_position_independent;
 
 static TLS int first_signal;
 static TLS int first_code;
@@ -59,341 +33,23 @@ static TLS uintptr_t last_reported_pc;
 static TLS volatile sig_atomic_t faults_recoverable;
 static TLS sigjmp_buf recover_from_fault;
 
-static char maps[1 << 20];
-static size_t maps_len;
-static char out[32768];
-static size_t out_len;
-
-static uintptr_t context_pc(void *ucontext)
-{
-    ucontext_t *uc = ucontext;
-#if defined(__x86_64__)
-    return (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
-#elif defined(__aarch64__)
-    return (uintptr_t)uc->uc_mcontext.pc;
-#endif
-}
-
-static uintptr_t context_return_address(void *ucontext)
-{
-    ucontext_t *uc = ucontext;
-#if defined(__x86_64__)
-    uintptr_t value = 0;
-    struct iovec local = {.iov_base = &value, .iov_len = sizeof value};
-    struct iovec remote = {.iov_base = (void *)uc->uc_mcontext.gregs[REG_RSP], .iov_len = sizeof value};
-    if (process_vm_readv(getpid(), &local, 1, &remote, 1, 0) != (ssize_t)sizeof value) {
-        return 0;
-    }
-    return value;
-#elif defined(__aarch64__)
-    return (uintptr_t)uc->uc_mcontext.regs[30];
-#endif
-}
-
-static void append(const char *s, size_t n)
-{
-    if (out_len >= sizeof out - 1) {
-        return;
-    }
-    size_t room = sizeof out - 1 - out_len;
-    if (n > room) {
-        n = room;
-    }
-    memcpy(out + out_len, s, n);
-    out_len += n;
-}
-
-static void append_str(const char *s)
-{
-    append(s, strlen(s));
-}
-
-static void append_json_chars(const char *s, size_t n)
-{
-    size_t start = n > MAX_NAME ? n - MAX_NAME : 0;
-    if (start > 0) {
-        append_str("...");
-    }
-    for (size_t i = start; i < n; i++) {
-        unsigned char c = (unsigned char)s[i];
-        char safe = c < 0x20 || c >= 0x7f || c == '"' || c == '\\' ? '?' : (char)c;
-        append(&safe, 1);
-    }
-}
-
-static void append_json_str(const char *s, size_t n)
-{
-    append("\"", 1);
-    append_json_chars(s, n);
-    append("\"", 1);
-}
-
-static void append_dec(long v)
-{
-    char buf[24];
-    int i = sizeof buf;
-    int negative = v < 0;
-    unsigned long u = negative ? -(unsigned long)v : (unsigned long)v;
-    do {
-        buf[--i] = (char)('0' + u % 10);
-        u /= 10;
-    } while (u);
-    if (negative) {
-        buf[--i] = '-';
-    }
-    append(buf + i, sizeof buf - i);
-}
-
-static void append_hex(uintptr_t v)
-{
-    char buf[2 + 2 * sizeof v];
-    int i = sizeof buf;
-    do {
-        buf[--i] = "0123456789abcdef"[v & 0xf];
-        v >>= 4;
-    } while (v);
-    buf[--i] = 'x';
-    buf[--i] = '0';
-    append(buf + i, sizeof buf - i);
-}
-
-static void load_maps(void)
-{
-    maps_len = 0;
-    int fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        return;
-    }
-    ssize_t n;
-    while (maps_len < sizeof maps && (n = read(fd, maps + maps_len, sizeof maps - maps_len)) > 0) {
-        maps_len += (size_t)n;
-    }
-    close(fd);
-}
-
-static const char *parse_hex(const char *p, const char *end, uintptr_t *v)
-{
-    *v = 0;
-    for (; p < end; p++) {
-        char c = *p;
-        if (c >= '0' && c <= '9') {
-            *v = *v << 4 | (uintptr_t)(c - '0');
-        } else if (c >= 'a' && c <= 'f') {
-            *v = *v << 4 | (uintptr_t)(c - 'a' + 10);
-        } else {
-            break;
-        }
-    }
-    return p;
-}
-
-struct mapping {
-    uintptr_t start;
-    uintptr_t end;
-    uintptr_t offset;
-    const char *path;
-    size_t path_len;
-};
-
-static const char *next_mapping(const char *p, struct mapping *m)
-{
-    const char *end = maps + maps_len;
-    if (p >= end) {
-        return NULL;
-    }
-    const char *eol = memchr(p, '\n', (size_t)(end - p));
-    if (!eol) {
-        eol = end;
-    }
-    const char *q = parse_hex(p, eol, &m->start);
-    if (q < eol) {
-        q++;
-    }
-    q = parse_hex(q, eol, &m->end);
-    for (int field = 0; field < 2 && q < eol; field++) {
-        while (q < eol && *q != ' ') {
-            q++;
-        }
-        while (q < eol && *q == ' ') {
-            q++;
-        }
-    }
-    q = parse_hex(q, eol, &m->offset);
-    for (int field = 0; field < 2 && q < eol; field++) {
-        while (q < eol && *q == ' ') {
-            q++;
-        }
-        while (q < eol && *q != ' ') {
-            q++;
-        }
-    }
-    while (q < eol && *q == ' ') {
-        q++;
-    }
-    m->path = q;
-    m->path_len = (size_t)(eol - q);
-    return eol + 1;
-}
-
-struct module {
-    const char *path;
-    size_t path_len;
-    uintptr_t base;
-};
-
-static int find_module(uintptr_t addr, struct module *mod)
-{
-    struct mapping m;
-    const char *found_path = NULL;
-    size_t found_len = 0;
-    for (const char *p = maps; (p = next_mapping(p, &m));) {
-        if (addr >= m.start && addr < m.end) {
-            found_path = m.path;
-            found_len = m.path_len;
-            break;
-        }
-    }
-    if (!found_path || found_len == 0 || found_path[0] != '/') {
-        return 0;
-    }
-    int has_base = 0;
-    for (const char *p = maps; (p = next_mapping(p, &m)) && m.start <= addr;) {
-        if (m.offset == 0 && m.path_len == found_len && memcmp(m.path, found_path, found_len) == 0) {
-            mod->path = found_path;
-            mod->path_len = found_len;
-            mod->base = m.start;
-            has_base = 1;
-        }
-    }
-    return has_base;
-}
-
-struct location {
-    struct module module;
-    uintptr_t value;
-};
-
-static struct location pc_location;
-static struct location return_location;
-static struct location caller_locations[MAX_FRAMES];
-static int caller_count;
-
-static void locate(uintptr_t addr, struct location *loc)
-{
-    if (find_module(addr, &loc->module)) {
-        int at_link_address = !executable_is_position_independent && loc->module.base == (uintptr_t)&__ehdr_start;
-        loc->value = at_link_address ? addr : addr - loc->module.base;
-    } else {
-        loc->module.path = NULL;
-        loc->value = addr;
-    }
-}
-
-static void append_location(const struct location *loc)
-{
-    append("\"", 1);
-    if (loc->module.path) {
-        append_json_chars(loc->module.path, loc->module.path_len);
-        append("+", 1);
-    }
-    append_hex(loc->value);
-    append("\"", 1);
-}
-
-static void write_all(const char *buf, size_t len)
-{
-    size_t written = 0;
-    for (int attempts = 10; written < len && attempts > 0; attempts--) {
-        struct pollfd fd = {.fd = STDERR_FILENO, .events = POLLOUT};
-        if (poll(&fd, 1, 100) <= 0) {
-            continue;
-        }
-        ssize_t n = write(STDERR_FILENO, buf + written, len - written);
-        if (n > 0) {
-            written += (size_t)n;
-        } else if (n < 0 && errno != EINTR && errno != EAGAIN) {
-            return;
-        }
-    }
-}
-
-static void format_report(const char *thread_name)
-{
-    out_len = 0;
-
-    append_str("{\"severity\":\"CRITICAL\",\"message\":\"fatal signal\",\"signal\":");
-    append_dec(first_signal);
-    append_str(",\"code\":");
-    append_dec(first_code);
-    append_str(",\"fault_addr\":");
-    if (first_code > 0) {
-        append("\"", 1);
-        append_hex((uintptr_t)first_fault_addr);
-        append("\"", 1);
-    } else {
-        append_str("null");
-    }
-    append_str(",\"tid\":");
-    append_dec(syscall(SYS_gettid));
-    append_str(",\"thread\":");
-    append_json_str(thread_name, strlen(thread_name));
-    append_str(",\"pc\":");
-    append_location(&pc_location);
-    if (first_callers_start < 0) {
-        append_str(",\"return_address\":");
-        if (first_return_address) {
-            append_location(&return_location);
-        } else {
-            append_str("null");
-        }
-    }
-    append_str(",\"callers\":[");
-    int callers_shown = 0;
-    for (; callers_shown < caller_count; callers_shown++) {
-        size_t len_without_caller = out_len;
-        if (callers_shown > 0) {
-            append(",", 1);
-        }
-        append_location(&caller_locations[callers_shown]);
-        if (out_len > MAX_LINE - MAX_CLOSING) {
-            out_len = len_without_caller;
-            break;
-        }
-    }
-    append_str("]");
-    if (callers_shown < caller_count) {
-        append_str(",\"callers_omitted\":");
-        append_dec(caller_count - callers_shown);
-    }
-    append_str("}");
-    out[out_len++] = '\n';
-}
-
 static int report(void)
 {
-    struct timespec interval = {.tv_sec = 0, .tv_nsec = 10 * 1000 * 1000};
-    for (int waits = 0; atomic_flag_test_and_set(&reporting); waits++) {
-        if (waits == 100) {
-            return 0;
-        }
-        nanosleep(&interval, NULL);
+    if (!lock_reports()) {
+        return 0;
     }
-    load_maps();
-
-    char thread_name[17] = {0};
-    prctl(PR_GET_NAME, thread_name, 0, 0, 0);
-
-    locate(first_pc, &pc_location);
-    locate(first_return_address, &return_location);
-    caller_count = 0;
-    for (int i = first_callers_start < 0 ? first_frame_count : first_callers_start; i < first_frame_count; i++) {
-        locate((uintptr_t)first_frames[i], &caller_locations[caller_count++]);
-    }
-
-    format_report(thread_name);
-
-    write_all(out, out_len);
-    atomic_flag_clear(&reporting);
+    struct crash crash = {
+        .signal = first_signal,
+        .code = first_code,
+        .fault_addr = first_fault_addr,
+        .pc = first_pc,
+        .return_address = first_return_address,
+        .frames = first_frames,
+        .frame_count = first_frame_count,
+        .callers_start = first_callers_start,
+    };
+    write_report(&crash, NULL);
+    unlock_reports();
     return 1;
 }
 
@@ -433,33 +89,8 @@ static void capture(int sig, siginfo_t *info, void *ucontext)
     first_fault_addr = info->si_addr;
     first_pc = context_pc(ucontext);
     walk_stack();
-    first_callers_start = -1;
-    for (int i = 0; i + 1 < first_frame_count; i++) {
-        if ((uintptr_t)first_frames[i] == first_pc) {
-            first_callers_start = i + 1;
-            break;
-        }
-    }
+    first_callers_start = find_callers_start(first_frames, first_frame_count, first_pc);
     first_return_address = first_callers_start < 0 ? context_return_address(ucontext) : 0;
-}
-
-static void die_by_default(int sig)
-{
-    struct sigaction dfl;
-    memset(&dfl, 0, sizeof dfl);
-    dfl.sa_handler = SIG_DFL;
-    sigemptyset(&dfl.sa_mask);
-    sigaction(sig, &dfl, NULL);
-
-    sigset_t set;
-    sigemptyset(&set);
-    sigaddset(&set, sig);
-    pthread_sigmask(SIG_UNBLOCK, &set, NULL);
-    raise(sig);
-    kill(getpid(), sig);
-    struct timespec grace = {.tv_sec = 1, .tv_nsec = 0};
-    nanosleep(&grace, NULL);
-    _exit(128 + sig);
 }
 
 static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
@@ -479,16 +110,7 @@ static void report_non_go_fault(int sig, siginfo_t *info, void *ucontext)
             last_reported_pc = first_pc;
         }
     }
-    const struct sigaction *previous = &previous_actions[sig];
-    if (previous->sa_handler == SIG_IGN) {
-        return;
-    }
-    if (previous->sa_handler != SIG_DFL) {
-        if (previous->sa_flags & SA_SIGINFO) {
-            previous->sa_sigaction(sig, info, ucontext);
-        } else {
-            previous->sa_handler(sig);
-        }
+    if (call_action(&previous_actions[sig], sig, info, ucontext)) {
         return;
     }
     if (info->si_code <= 0 || !go_actions[sig].sa_sigaction) {
@@ -527,6 +149,7 @@ __attribute__((constructor)) static void install_before_go_runtime(void)
     if (!enabled || strcmp(enabled, "true") != 0) {
         return;
     }
+    executable_base = (uintptr_t)&__ehdr_start;
     executable_is_position_independent = __ehdr_start.e_type != ET_EXEC;
     walk_stack();
     for (size_t i = 0; i < COUNT(recoverable_in_go); i++) {
