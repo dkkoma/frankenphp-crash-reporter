@@ -318,6 +318,7 @@ match.
 | Go code | not reported | not reported |
 | Unrecovered Go panic with `GOTRACEBACK=crash` | the SIGABRT of the Go runtime is reported | not reported |
 | SIGSEGV, SIGBUS, SIGFPE on a PHP thread, FrankenPHP as PID 1 | reported, then the process exits about a second later with status 128 + signal number | reported once; the process does not end, as without a reporter |
+| `abort()` on a PHP thread, FrankenPHP as PID 1 | see [FrankenPHP as PID 1](#frankenphp-as-pid-1) | reported; the process ends as without a reporter. With an older glibc on amd64, the SIGSEGV glibc falls back to is reported too, and the process does not end |
 
 A handler installed before the program started and `os/signal.Notify` on
 these signals are not tested with the extension yet.

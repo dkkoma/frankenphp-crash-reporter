@@ -29,8 +29,9 @@ crash_as_pid1() {
     done
     running=$(docker inspect -f '{{.State.Running}}' "$cid")
     status=$(docker inspect -f '{{.State.ExitCode}}' "$cid")
-    reports=$(docker logs "$cid" 2>&1 | grep -c '"message":"fatal signal"')
-    docker logs "$cid" 2>&1 | grep '"message":"fatal signal"'
+    logs=$(docker logs "$cid" 2>&1)
+    reports=$(printf '%s\n' "$logs" | grep -c '"message":"fatal signal"')
+    printf '%s\n' "$logs" | grep '"message":"fatal signal"'
     docker rm -f "$cid" > /dev/null
     echo "running=$running status=$status"
 }
@@ -94,7 +95,14 @@ crash_as_pid1 "extension: abort() on a PHP thread while FrankenPHP is PID 1" fal
 if [ "$running" != "$running_without_reporter" ] || [ "$status" -ne "$status_without_reporter" ]; then
     fail "$case_name: running=$running, exit status is $status, want running=$running_without_reporter, $status_without_reporter"
 fi
-expect_reports 1
+# When abort() does not end the process, glibc before 2.41 falls back to an
+# instruction that faults; on amd64 that is a SIGSEGV, reported as well.
+fallback=$(printf '%s\n' "$logs" | grep -c '"message":"fatal signal","signal":11,"code":128,')
+if [ "$running_without_reporter" = false ] || [ "$fallback" -eq 0 ]; then
+    expect_reports 1
+else
+    expect_reports 2
+fi
 
 if [ "$failures" -ne 0 ]; then
     echo "crash reporter PID 1 test: $failures failed"
